@@ -15,3 +15,6 @@ Thumbs.db
 # ignore .github/* node stuff
 .github/workflows/package.json
 .github/workflows/package-lock.json
+
+# ignore src/rust/osww-firmware/target/*
+src/rust/osww-firmware/target/*
