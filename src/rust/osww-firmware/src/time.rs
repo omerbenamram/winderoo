@@ -1,5 +1,6 @@
 //! Time-related helpers for the firmware domain model.
 
+use alloc::string::String;
 use core::fmt;
 use thiserror::Error;
 

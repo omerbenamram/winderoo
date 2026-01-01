@@ -1,10 +1,11 @@
 //! Persistent settings handling for Winderoo.
 
 use crate::model::{
-    Direction, MotorDirection, RtcConfig, RuntimeState, ScreenSchedule, ScreenState, TimerConfig,
-    WinderStatus,
+    Direction, MotorDirection, RtcConfig, RuntimeState, ScreenSchedule, ScreenState, SettingsSnapshot,
+    TimerConfig, WinderStatus,
 };
 use crate::time::{TimeError, TimeOfDay};
+use alloc::string::String;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -181,25 +182,30 @@ impl StoredSettings {
         })
     }
 
+    /// Create stored settings from a typed snapshot.
+    pub fn from_snapshot(snapshot: &SettingsSnapshot) -> Self {
+        Self {
+            status: snapshot.status.as_str().to_string(),
+            rotations_per_day: snapshot.rotations_per_day.to_string(),
+            hour: format!("{:02}", snapshot.timer_hour),
+            minutes: format!("{:02}", snapshot.timer_minutes),
+            timer_enabled: if snapshot.timer_enabled { "1".to_string() } else { "0".to_string() },
+            direction: snapshot.direction.as_api_str().to_string(),
+            custom_wind_duration: snapshot.custom_wind_duration_secs.to_string(),
+            custom_wind_pause_duration: snapshot.custom_wind_pause_secs.to_string(),
+            rotation_duration_secs: snapshot.rotation_duration_secs,
+            gmt_offset: snapshot.gmt_offset,
+            dst: snapshot.dst,
+            screen_schedule_enabled: snapshot.screen_schedule_enabled,
+            screen_schedule_start_time: snapshot.screen_schedule_start.to_hh_mm(),
+            screen_schedule_end_time: snapshot.screen_schedule_end.to_hh_mm(),
+            screen_sleep: snapshot.screen_sleep,
+        }
+    }
+
     /// Create stored settings from the current runtime state.
     pub fn from_runtime(state: &RuntimeState) -> Self {
-        Self {
-            status: state.status_str().to_string(),
-            rotations_per_day: state.rotations_per_day.to_string(),
-            hour: format!("{:02}", state.timer.start_time.hour),
-            minutes: format!("{:02}", state.timer.start_time.minute),
-            timer_enabled: if state.timer.enabled { "1".to_string() } else { "0".to_string() },
-            direction: state.direction.as_api_str().to_string(),
-            custom_wind_duration: state.custom_wind_duration_secs.to_string(),
-            custom_wind_pause_duration: state.custom_wind_pause_secs.to_string(),
-            rotation_duration_secs: state.rotation_duration_secs,
-            gmt_offset: state.rtc.gmt_offset,
-            dst: state.rtc.dst,
-            screen_schedule_enabled: state.screen.schedule.enabled,
-            screen_schedule_start_time: state.screen.schedule.start.to_hh_mm(),
-            screen_schedule_end_time: state.screen.schedule.end.to_hh_mm(),
-            screen_sleep: state.screen.sleep,
-        }
+        Self::from_snapshot(&SettingsSnapshot::from_state(state))
     }
 }
 

@@ -1,6 +1,9 @@
 //! API request/response models for the Winderoo firmware.
 
-use crate::model::{Direction, RuntimeState, WinderStatus};
+use alloc::string::String;
+use crate::model::{
+    Direction, SettingsSnapshot, StatusSnapshot, UpdateAction, UpdateRequest, WinderStatus,
+};
 use crate::settings::StoredSettings;
 use crate::time::TimeOfDay;
 use serde::{Deserialize, Serialize};
@@ -156,15 +159,6 @@ fn parse_u8(field: &'static str, value: &str) -> Result<u8, ApiError> {
         .map_err(|_| ApiError::InvalidNumber { field, value: value.to_string() })
 }
 
-/// Parsed update action values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UpdateAction {
-    /// Start winding.
-    Start,
-    /// Stop winding.
-    Stop,
-}
-
 impl UpdateAction {
     /// Parse a string into an [`UpdateAction`].
     pub fn parse(value: &str) -> Result<Self, ApiError> {
@@ -225,41 +219,6 @@ pub struct UpdatePayload {
     pub rtc_gmt_offset: f32,
     /// RTC DST flag.
     #[serde(rename = "rtcDST", deserialize_with = "de_bool_from_any")]
-    pub rtc_dst: bool,
-}
-
-/// Fully parsed update payload.
-#[derive(Debug, Clone, PartialEq)]
-pub struct UpdateRequest {
-    /// Parsed direction mode.
-    pub direction: Direction,
-    /// Rotations per day.
-    pub rotations_per_day: u16,
-    /// Start/stop action.
-    pub action: UpdateAction,
-    /// Timer hour.
-    pub hour: u8,
-    /// Timer minutes.
-    pub minutes: u8,
-    /// Timer enabled flag.
-    pub timer_enabled: bool,
-    /// Screen sleep state.
-    pub screen_sleep: bool,
-    /// Screen schedule enabled flag.
-    pub screen_schedule_enabled: Option<bool>,
-    /// Screen schedule start time.
-    pub screen_schedule_start: Option<TimeOfDay>,
-    /// Screen schedule end time.
-    pub screen_schedule_end: Option<TimeOfDay>,
-    /// Custom winding duration (seconds).
-    pub custom_wind_duration_secs: u32,
-    /// Custom pause duration (seconds).
-    pub custom_wind_pause_secs: u32,
-    /// Rotation duration (seconds).
-    pub rotation_duration_secs: u16,
-    /// RTC GMT offset.
-    pub rtc_gmt_offset: f32,
-    /// RTC DST flag.
     pub rtc_dst: bool,
 }
 
@@ -384,31 +343,31 @@ pub struct StatusResponse {
 }
 
 impl StatusResponse {
-    /// Build a status response from runtime state.
-    pub fn from_state(state: &RuntimeState, current_epoch: u64, rssi: i32, api_version: &str) -> Self {
+    /// Build a status response from a typed snapshot.
+    pub fn from_snapshot(snapshot: &StatusSnapshot) -> Self {
         Self {
-            status: state.status_str().to_string(),
-            rotations_per_day: state.rotations_per_day.to_string(),
-            direction: state.direction.as_api_str().to_string(),
-            hour: format!("{:02}", state.timer.start_time.hour),
-            minutes: format!("{:02}", state.timer.start_time.minute),
-            start_time_epoch: state.routine.start_epoch,
-            current_time_epoch: current_epoch,
-            estimated_routine_finish_epoch: state.routine.estimated_finish_epoch,
-            winder_enabled: if state.winder_enabled { "1".to_string() } else { "0".to_string() },
-            timer_enabled: if state.timer.enabled { "1".to_string() } else { "0".to_string() },
-            db: rssi,
-            screen_sleep: state.screen.sleep,
-            screen_equipped: state.screen.equipped,
-            custom_wind_duration: state.custom_wind_duration_secs.to_string(),
-            custom_wind_pause_duration: state.custom_wind_pause_secs.to_string(),
-            rotation_duration_secs: state.rotation_duration_secs,
-            gmt_offset: state.rtc.gmt_offset,
-            api_version: api_version.to_string(),
-            dst: state.rtc.dst,
-            screen_schedule_enabled: state.screen.schedule.enabled,
-            screen_schedule_start_time: state.screen.schedule.start.to_hh_mm(),
-            screen_schedule_end_time: state.screen.schedule.end.to_hh_mm(),
+            status: snapshot.status.as_str().to_string(),
+            rotations_per_day: snapshot.rotations_per_day.to_string(),
+            direction: snapshot.direction.as_api_str().to_string(),
+            hour: format!("{:02}", snapshot.timer_hour),
+            minutes: format!("{:02}", snapshot.timer_minutes),
+            start_time_epoch: snapshot.start_time_epoch,
+            current_time_epoch: snapshot.current_time_epoch,
+            estimated_routine_finish_epoch: snapshot.estimated_routine_finish_epoch,
+            winder_enabled: if snapshot.winder_enabled { "1".to_string() } else { "0".to_string() },
+            timer_enabled: if snapshot.timer_enabled { "1".to_string() } else { "0".to_string() },
+            db: snapshot.rssi_db,
+            screen_sleep: snapshot.screen_sleep,
+            screen_equipped: snapshot.screen_equipped,
+            custom_wind_duration: snapshot.custom_wind_duration_secs.to_string(),
+            custom_wind_pause_duration: snapshot.custom_wind_pause_secs.to_string(),
+            rotation_duration_secs: snapshot.rotation_duration_secs,
+            gmt_offset: snapshot.gmt_offset,
+            api_version: snapshot.api_version.clone(),
+            dst: snapshot.dst,
+            screen_schedule_enabled: snapshot.screen_schedule_enabled,
+            screen_schedule_start_time: snapshot.screen_schedule_start.to_hh_mm(),
+            screen_schedule_end_time: snapshot.screen_schedule_end.to_hh_mm(),
         }
     }
 }
@@ -430,8 +389,8 @@ impl ResetResponse {
 }
 
 /// Helper to transform runtime state into stored settings.
-pub fn settings_from_state(state: &RuntimeState) -> StoredSettings {
-    StoredSettings::from_runtime(state)
+pub fn settings_from_snapshot(snapshot: &SettingsSnapshot) -> StoredSettings {
+    StoredSettings::from_snapshot(snapshot)
 }
 
 /// Helper to create a stored status payload.

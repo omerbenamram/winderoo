@@ -5,23 +5,11 @@ edition = "2021"
 license = "MIT"
 
 [features]
-# Enable ESP32 runtime integration. Keep off for host tests.
-esp32 = ["dep:esp-idf-sys", "dep:esp-idf-svc", "dep:esp-idf-hal", "dep:embedded-svc"]
-# Optional hardware features to mirror the C++ build flags.
-oled = []
-home-assistant = []
-pwm-motor = []
+default = ["std"]
+# Enable std-dependent helpers like JSON parsing/serialization.
+std = ["dep:serde_json", "serde/std"]
 
 [dependencies]
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-thiserror = "1.0"
-
-# ESP32-only dependencies
-esp-idf-sys = { version = "0.33.7", optional = true }
-esp-idf-svc = { version = "0.47", optional = true }
-esp-idf-hal = { version = "0.42.5", optional = true }
-embedded-svc = { version = "0.27", optional = true }
-
-[dev-dependencies]
-serde_json = "1.0"
+serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1.0", optional = true }
+thiserror = { version = "1.0", default-features = false }

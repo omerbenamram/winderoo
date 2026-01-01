@@ -1,10 +1,12 @@
 //! High-level firmware state machine and update logic.
 
-use crate::api::{StatusResponse, UpdateAction, UpdateRequest};
 use crate::hardware::{LedPattern, RandomSource};
-use crate::model::{Direction, MotorDirection, RuntimeState, WinderStatus};
-use crate::settings::StoredSettings;
+use crate::model::{
+    Direction, MotorDirection, RuntimeState, SettingsSnapshot, StatusSnapshot, UpdateAction,
+    UpdateRequest, WinderStatus,
+};
 use crate::time::TimeOfDay;
+use alloc::{string::String, vec::Vec};
 
 /// Actions emitted by the controller for the hardware integration layer.
 #[derive(Debug, Clone, PartialEq)]
@@ -26,7 +28,7 @@ pub enum ControllerEvent {
     /// Trigger an LED pattern.
     Led(LedPattern),
     /// Persist settings to storage.
-    PersistSettings(StoredSettings),
+    PersistSettings(SettingsSnapshot),
     /// Synchronize the RTC via NTP.
     SyncTime,
     /// Restart the device.
@@ -47,22 +49,22 @@ impl<R: RandomSource> Controller<R> {
         Self { state, rng }
     }
 
-    /// Build a status response suitable for `/api/status`.
-    pub fn status_response(
+    /// Build a typed status snapshot suitable for `/api/status`.
+    pub fn status_snapshot(
         &self,
         current_epoch: u64,
         rssi: i32,
         api_version: &str,
-    ) -> StatusResponse {
-        StatusResponse::from_state(&self.state, current_epoch, rssi, api_version)
+    ) -> StatusSnapshot {
+        StatusSnapshot::from_state(&self.state, current_epoch, rssi, api_version)
     }
 
     /// Apply a timer-enabled toggle (from `/api/timer`).
     pub fn apply_timer_enabled(&mut self, enabled: bool) -> Vec<ControllerEvent> {
         self.state.timer.enabled = enabled;
-        vec![ControllerEvent::PersistSettings(
-            StoredSettings::from_runtime(&self.state),
-        )]
+        vec![ControllerEvent::PersistSettings(SettingsSnapshot::from_state(
+            &self.state,
+        ))]
     }
 
     /// Apply a power toggle (from `/api/power`).
@@ -83,9 +85,9 @@ impl<R: RandomSource> Controller<R> {
                 events.push(ControllerEvent::DisplayDynamic);
             }
         }
-        events.push(ControllerEvent::PersistSettings(
-            StoredSettings::from_runtime(&self.state),
-        ));
+        events.push(ControllerEvent::PersistSettings(SettingsSnapshot::from_state(
+            &self.state,
+        )));
         events
     }
 
@@ -156,9 +158,9 @@ impl<R: RandomSource> Controller<R> {
         }
 
         events.push(ControllerEvent::SyncTime);
-        events.push(ControllerEvent::PersistSettings(
-            StoredSettings::from_runtime(&self.state),
-        ));
+        events.push(ControllerEvent::PersistSettings(SettingsSnapshot::from_state(
+            &self.state,
+        )));
         events
     }
 
@@ -227,9 +229,9 @@ impl<R: RandomSource> Controller<R> {
                         "Winding Complete".to_string(),
                     ));
                 }
-                events.push(ControllerEvent::PersistSettings(
-                    StoredSettings::from_runtime(&self.state),
-                ));
+                events.push(ControllerEvent::PersistSettings(SettingsSnapshot::from_state(
+                    &self.state,
+                )));
             }
         }
 
@@ -503,5 +505,72 @@ mod tests {
         assert!(!events
             .iter()
             .any(|e| matches!(e, ControllerEvent::PauseSeconds(_))));
+    }
+
+    #[test]
+    fn cycle_pause_requires_random_gate() {
+        let mut state = base_state();
+        state.status = WinderStatus::Winding;
+        state.routine.running = true;
+        state.routine.start_epoch = 0;
+        state.routine.previous_epoch = 0;
+        state.routine.estimated_finish_epoch = 10_000;
+        state.custom_wind_duration_secs = 10;
+        state.custom_wind_pause_secs = 5;
+        state.direction = Direction::Clockwise;
+        state.motor_direction = MotorDirection::Clockwise;
+
+        // Force the random sampling gate to *not* fire (`r > 25`).
+        let mut controller = Controller::new(state, ConstRng(99));
+        let events = controller.tick(20, TimeOfDay::new(0, 0).unwrap());
+
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, ControllerEvent::PauseSeconds(_))));
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, ControllerEvent::MotorStop)));
+        assert_eq!(controller.state.motor_direction, MotorDirection::Clockwise);
+    }
+
+    #[test]
+    fn cycle_pause_does_not_toggle_in_single_direction() {
+        let mut state = base_state();
+        state.status = WinderStatus::Winding;
+        state.routine.running = true;
+        state.routine.start_epoch = 0;
+        state.routine.previous_epoch = 0;
+        state.routine.estimated_finish_epoch = 10_000;
+        state.custom_wind_duration_secs = 10;
+        state.custom_wind_pause_secs = 5;
+        state.direction = Direction::Clockwise;
+        state.motor_direction = MotorDirection::Clockwise;
+
+        let mut controller = Controller::new(state, ConstRng(0));
+        let _events = controller.tick(20, TimeOfDay::new(0, 0).unwrap());
+
+        assert_eq!(controller.state.motor_direction, MotorDirection::Clockwise);
+    }
+
+    #[test]
+    fn routine_finishes_and_persists_settings() {
+        let mut state = base_state();
+        state.status = WinderStatus::Winding;
+        state.routine.running = true;
+        state.routine.start_epoch = 0;
+        state.routine.previous_epoch = 0;
+        state.routine.estimated_finish_epoch = 100;
+
+        let mut controller = Controller::new(state, ConstRng(0));
+        let events = controller.tick(150, TimeOfDay::new(0, 0).unwrap());
+
+        assert!(!controller.state.routine.running);
+        assert_eq!(controller.state.status, WinderStatus::Stopped);
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, ControllerEvent::MotorStop)));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, ControllerEvent::PersistSettings(_))));
     }
 }
