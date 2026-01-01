@@ -18,6 +18,7 @@ This document explains the separation between the **core winding logic** and
   - `SystemHooks`
 - `EventDispatcher` maps `ControllerEvent` values to hardware actions.
 - `runtime.rs` provides a thin wrapper that runs controller ticks and dispatches events.
+- `tasks.rs` defines an async firmware loop (`FirmwareTask`) for embassy-based runtimes.
 
 ### 3) Device Runtime (to be wired)
 - An embassy task loop will:

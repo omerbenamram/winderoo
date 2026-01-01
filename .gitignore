@@ -8,6 +8,9 @@ node_modules/
 
 src/platformio/osww-server/src/configurables.h
 
+# Rust build artifacts
+src/rust/**/target/
+
 # System files
 .DS_Store
 Thumbs.db
