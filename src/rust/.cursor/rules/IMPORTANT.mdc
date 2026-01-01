@@ -1,0 +1,7 @@
+---
+alwaysApply: true
+---
+
+This is a rust port of the original C++ code (src/platformio/osww-server).
+
+When assessing code in the rust port - always consider the original C++ code (src/platformio/osww-server) for context.
