@@ -17,6 +17,7 @@ This document explains the separation between the **core winding logic** and
   - `DisplayControl`
   - `SystemHooks`
 - `EventDispatcher` maps `ControllerEvent` values to hardware actions.
+- `runtime.rs` provides a thin wrapper that runs controller ticks and dispatches events.
 
 ### 3) Device Runtime (to be wired)
 - An embassy task loop will:

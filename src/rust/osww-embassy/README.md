@@ -7,6 +7,7 @@ state machine so the winding behavior can be tested on a host machine.
 ## What it contains
 - `hardware.rs`: drivers + traits to map `ControllerEvent` values to GPIO/PWM/
   display calls.
+- `runtime.rs`: a small wrapper that runs controller ticks and dispatches events.
 - No ESP-IDF dependencies (pure Rust stack).
 
 ## How it fits
