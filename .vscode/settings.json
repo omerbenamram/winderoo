@@ -61,5 +61,22 @@
     },
     "rust-analyzer.linkedProjects": [
         "src/rust/osww-firmware/Cargo.toml"
-    ]
+    ],
+    // Rust ESP32 (ESP-IDF) firmware analysis settings.
+    // These make rust-analyzer index the actual device build so "Go to definition"
+    // works across `std`, esp-idf crates, and generated bindings.
+    "rust-analyzer.rustup.toolchain": "esp",
+    "rust-analyzer.cargo.target": "xtensa-esp32-espidf",
+    "rust-analyzer.cargo.features": [
+        "esp32"
+    ],
+    "rust-analyzer.cargo.extraArgs": [
+        "-Z",
+        "build-std=std,panic_abort",
+        "-Z",
+        "build-std-features=panic_immediate_abort"
+    ],
+    "rust-analyzer.cargo.buildScripts.enable": true,
+    "rust-analyzer.checkOnSave.command": "check",
+    "rust-analyzer.checkOnSave.allTargets": false
 }

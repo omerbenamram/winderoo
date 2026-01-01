@@ -7,6 +7,10 @@ license = "MIT"
 [[package.metadata.esp-idf-sys.extra_components]]
 remote_component = { name = "joltwallet/littlefs", version = "1.14" }
 
+[[package.metadata.esp-idf-sys.extra_components]]
+# ESP-IDF no longer bundles mDNS in-tree for some versions; pull it via the component registry.
+remote_component = { name = "espressif/mdns", version = "1.9.1" }
+
 [features]
 # Enable ESP32 runtime integration. Keep off for host tests.
 esp32 = [
@@ -33,9 +37,15 @@ heapless = "0.8"
 
 # ESP32-only dependencies
 esp-idf-sys = { version = "0.36.1", optional = true }
-esp-idf-svc = { version = "0.51.0", optional = true }
+esp-idf-svc = { version = "0.51.0", optional = true, features = ["experimental"] }
 esp-idf-hal = { version = "0.45.2", optional = true }
 embedded-svc = { version = "0.28.1", optional = true }
 
 [dev-dependencies]
 serde_json = "1.0"
+
+[patch.crates-io]
+# Temporary local patch: `esp-idf-svc` 0.51.0 assumes `c_char` is signed (`i8`)
+# for LittleFS partition labels, but on `xtensa-esp32-espidf` `c_char` is `u8`.
+# This keeps the type ABI-correct by using `core::ffi::c_char`.
+esp-idf-svc = { path = "../vendor/esp-idf-svc" }

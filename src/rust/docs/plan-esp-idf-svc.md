@@ -14,7 +14,7 @@ Port the existing ESP32 firmware to Rust using ESP-IDF services to preserve feat
 - Create ESP-IDF enabled binary target in `src/rust/osww-firmware`.
 - Add `esp-idf-svc`, `esp-idf-hal`, `embedded-svc` wiring behind `esp32` feature.
 - Provide `sdkconfig.defaults` (Wi-Fi, LwIP, mDNS, SNTP, LittleFS).
-- Confirm `cargo build -F esp32` works.
+- Confirm `cargo esp32-build` works.
 
 ### 2) Hardware layer
 - Implement hardware traits (GPIO for motor, PWM for LED, I2C OLED).

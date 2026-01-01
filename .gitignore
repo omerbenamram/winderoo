@@ -19,5 +19,8 @@ Thumbs.db
 # ignore src/rust/osww-firmware/target/*
 src/rust/osww-firmware/target/*
 
+# esp-idf-sys / embuild toolchain & framework downloads (generated)
+src/rust/osww-firmware/.embuild/
+
 # Local external references (not part of this repo)
 externals/

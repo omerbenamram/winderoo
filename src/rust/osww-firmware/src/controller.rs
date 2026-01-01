@@ -26,7 +26,7 @@ pub enum ControllerEvent {
     /// Trigger an LED pattern.
     Led(LedPattern),
     /// Persist settings to storage.
-    PersistSettings(StoredSettings),
+    PersistSettings(Box<StoredSettings>),
     /// Synchronize the RTC via NTP.
     SyncTime,
     /// Restart the device.
@@ -60,9 +60,9 @@ impl<R: RandomSource> Controller<R> {
     /// Apply a timer-enabled toggle (from `/api/timer`).
     pub fn apply_timer_enabled(&mut self, enabled: bool) -> Vec<ControllerEvent> {
         self.state.timer.enabled = enabled;
-        vec![ControllerEvent::PersistSettings(
+        vec![ControllerEvent::PersistSettings(Box::new(
             StoredSettings::from_runtime(&self.state),
-        )]
+        ))]
     }
 
     /// Apply a power toggle (from `/api/power`).
@@ -81,9 +81,9 @@ impl<R: RandomSource> Controller<R> {
             });
             events.push(ControllerEvent::DisplayDynamic);
         }
-        events.push(ControllerEvent::PersistSettings(
+        events.push(ControllerEvent::PersistSettings(Box::new(
             StoredSettings::from_runtime(&self.state),
-        ));
+        )));
         events
     }
 
@@ -154,9 +154,9 @@ impl<R: RandomSource> Controller<R> {
         }
 
         events.push(ControllerEvent::SyncTime);
-        events.push(ControllerEvent::PersistSettings(
+        events.push(ControllerEvent::PersistSettings(Box::new(
             StoredSettings::from_runtime(&self.state),
-        ));
+        )));
         events
     }
 
@@ -233,9 +233,9 @@ impl<R: RandomSource> Controller<R> {
                         "Winding Complete".to_string(),
                     ));
                 }
-                events.push(ControllerEvent::PersistSettings(
+                events.push(ControllerEvent::PersistSettings(Box::new(
                     StoredSettings::from_runtime(&self.state),
-                ));
+                )));
             }
         }
 

@@ -13,8 +13,9 @@ This repo now includes a Rust port of the ESP32 firmware built on **ESP-IDF** (n
   - OLED (I2C): SDA GPIO21, SCL GPIO22, address 0x3C
 
 ## Prerequisites
-- Rust toolchain (stable)
-- ESP-IDF toolchain via `espup` (recommended by esp-rs)
+- Rust toolchain via `espup` (recommended by esp-rs)
+  - This repo pins the project toolchain to `esp` via `rust-toolchain.toml` (required for Xtensa / ESP32).
+  - For best IDE navigation, ensure the `rust-src` component is installed for the `esp` toolchain.
 - Flashing tool (`espflash`/`cargo-espflash` or `esptool.py`)
 - LittleFS image builder (`mklittlefs` or `littlefs-python`)
 
@@ -22,7 +23,13 @@ This repo now includes a Rust port of the ESP32 firmware built on **ESP-IDF** (n
 From `src/rust/osww-firmware`:
 
 ```bash
-cargo build --release -F esp32
+cargo esp32-build
+```
+
+Equivalent explicit command:
+
+```bash
+cargo build -Z build-std=std,panic_abort -Z build-std-features=panic_immediate_abort --release --target xtensa-esp32-espidf -F esp32
 ```
 
 Optional features (match the C++ flags):
@@ -33,13 +40,19 @@ Optional features (match the C++ flags):
 Example:
 
 ```bash
-cargo build --release -F "esp32 oled pwm-motor home-assistant"
+cargo build -Z build-std=std,panic_abort -Z build-std-features=panic_immediate_abort --release --target xtensa-esp32-espidf -F "esp32 oled pwm-motor home-assistant"
 ```
 
 Then flash the firmware using your preferred tool. Example with `cargo-espflash`:
 
 ```bash
 cargo espflash --release --monitor
+```
+
+Or use the repo-provided runner (flash + monitor):
+
+```bash
+cargo esp32
 ```
 
 ## Build & Flash (LittleFS UI)
@@ -70,7 +83,7 @@ When `home-assistant` is enabled, the firmware reads the MQTT broker settings fr
 Example:
 
 ```bash
-HOME_ASSISTANT_BROKER=192.168.1.10:1883 cargo build --release -F "esp32 home-assistant"
+HOME_ASSISTANT_BROKER=192.168.1.10:1883 cargo build -Z build-std=std,panic_abort -Z build-std-features=panic_immediate_abort --release --target xtensa-esp32-espidf -F "esp32 home-assistant"
 ```
 
 ## Runtime Behavior (Quick Notes)

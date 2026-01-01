@@ -6,6 +6,9 @@ use crate::hardware::{LedPattern, XorShift32};
 use crate::model::{Direction, MotorDirection, RuntimeState, WinderStatus};
 use crate::settings::{SettingsError, StoredSettings};
 use crate::time::{time_of_day_from_epoch, TimeOfDay};
+use embedded_svc::http::headers::content_type;
+use embedded_svc::http::Method;
+use embedded_svc::io::{Read as SvcRead, Write as SvcWrite};
 use esp_idf_hal::gpio::{Input, Output, PinDriver, Pull};
 use esp_idf_hal::i2c::{I2cConfig, I2cDriver};
 use esp_idf_hal::ledc::{config::TimerConfig, LedcDriver, LedcTimerDriver};
@@ -19,13 +22,13 @@ use esp_idf_svc::log::EspLogger;
 use esp_idf_svc::mdns::EspMdns;
 use esp_idf_svc::nvs::{EspDefaultNvsPartition, EspNvs};
 use esp_idf_svc::sntp::{EspSntp, SyncStatus};
-use esp_idf_svc::wifi::{AccessPointConfiguration, AuthMethod, BlockingWifi, ClientConfiguration, Configuration, EspWifi};
-use embedded_svc::http::headers::content_type;
-use embedded_svc::http::Method;
+use esp_idf_svc::wifi::{
+    AccessPointConfiguration, AuthMethod, BlockingWifi, ClientConfiguration, Configuration, EspWifi,
+};
 use heapless::String as HeaplessString;
 use log::{info, warn};
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{Read as StdRead, Write as StdWrite};
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
@@ -43,13 +46,13 @@ use embedded_graphics::pixelcolor::BinaryColor;
 #[cfg(feature = "oled")]
 use embedded_graphics::prelude::*;
 #[cfg(feature = "oled")]
-use embedded_graphics::primitives::{Line, Rectangle, Triangle, PrimitiveStyle};
+use embedded_graphics::primitives::{Line, PrimitiveStyle, Rectangle, Triangle};
 #[cfg(feature = "oled")]
 use embedded_graphics::text::{Alignment, Text};
 #[cfg(feature = "oled")]
 use ssd1306::prelude::{DisplayRotation, DisplaySize128x64};
 #[cfg(feature = "oled")]
-use ssd1306::{Ssd1306, I2CDisplayInterface};
+use ssd1306::{I2CDisplayInterface, Ssd1306};
 
 #[cfg(feature = "home-assistant")]
 use embedded_svc::mqtt::client::QoS;
@@ -78,6 +81,8 @@ type ButtonPin = esp_idf_hal::gpio::Gpio13;
 pub enum Esp32Error {
     #[error("esp-idf error: {0}")]
     Esp(#[from] esp_idf_sys::EspError),
+    #[error("esp-idf io error: {0}")]
+    SvcIo(#[from] esp_idf_svc::io::EspIOError),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("json error: {0}")]
@@ -99,11 +104,7 @@ pub fn run() -> Result<(), Esp32Error> {
     esp_idf_sys::link_patches();
     EspLogger::initialize_default();
 
-    let peripherals = Peripherals::take().ok_or_else(|| {
-        Esp32Error::Esp(esp_idf_sys::EspError::from_infallible::<
-            esp_idf_sys::ESP_ERR_INVALID_STATE,
-        >())
-    })?;
+    let peripherals = Peripherals::take()?;
     let sysloop = EspSystemEventLoop::take()?;
     let nvs = EspDefaultNvsPartition::take()?;
 
@@ -134,7 +135,10 @@ pub fn run() -> Result<(), Esp32Error> {
     let hardware = Arc::new(Mutex::new(hardware));
     let storage = Arc::new(storage);
 
-    let mut wifi = BlockingWifi::wrap(EspWifi::new(modem, sysloop.clone(), Some(nvs.clone()))?, sysloop.clone())?;
+    let mut wifi = BlockingWifi::wrap(
+        EspWifi::new(modem, sysloop.clone(), Some(nvs.clone()))?,
+        sysloop.clone(),
+    )?;
 
     let creds = WifiCredentials::load(&nvs)?;
     if let Some(creds) = creds {
@@ -148,7 +152,7 @@ pub fn run() -> Result<(), Esp32Error> {
 
     let mut mdns = EspMdns::take()?;
     mdns.set_hostname(HOSTNAME)?;
-    mdns.add_service(HOSTNAME, "_winderoo", "_tcp", 80, &[])?;
+    mdns.add_service(Some(HOSTNAME), "_winderoo", "_tcp", 80, &[])?;
 
     sync_time()?;
 
@@ -159,7 +163,15 @@ pub fn run() -> Result<(), Esp32Error> {
 
     resume_if_needed(&shared, &hardware, &storage)?;
 
-    run_loop(shared, hardware, storage, wifi, nvs.clone(), #[cfg(feature = "home-assistant")] ha)?;
+    run_loop(
+        shared,
+        hardware,
+        storage,
+        wifi,
+        nvs.clone(),
+        #[cfg(feature = "home-assistant")]
+        ha,
+    )?;
 
     Ok(())
 }
@@ -170,7 +182,10 @@ fn mount_littlefs() -> Result<MountedLittlefs<Littlefs<std::ffi::CString>>, Esp3
     Ok(mounted)
 }
 
-fn connect_wifi(wifi: &mut BlockingWifi<EspWifi>, creds: &WifiCredentials) -> Result<(), Esp32Error> {
+fn connect_wifi(
+    wifi: &mut BlockingWifi<EspWifi>,
+    creds: &WifiCredentials,
+) -> Result<(), Esp32Error> {
     let mut client_cfg = ClientConfiguration::default();
     client_cfg.ssid = to_heapless(&creds.ssid)?;
     client_cfg.password = to_heapless(&creds.password)?;
@@ -215,7 +230,7 @@ fn start_config_portal(
         ..Default::default()
     })?;
 
-    server.fn_handler("/", Method::Get, move |req| {
+    server.fn_handler("/", Method::Get, move |req| -> Result<(), Esp32Error> {
         let page = config_portal_page();
         let headers = [content_type("text/html"), cors_allow_origin()];
         let mut response = req.into_response(200, Some("OK"), &headers)?;
@@ -223,7 +238,7 @@ fn start_config_portal(
         Ok(())
     })?;
 
-    server.fn_handler("/*", Method::Get, move |req| {
+    server.fn_handler("/*", Method::Get, move |req| -> Result<(), Esp32Error> {
         let page = config_portal_page();
         let headers = [content_type("text/html"), cors_allow_origin()];
         let mut response = req.into_response(200, Some("OK"), &headers)?;
@@ -231,27 +246,30 @@ fn start_config_portal(
         Ok(())
     })?;
 
-    server.fn_handler("/wifi", Method::Post, move |mut req| {
-        let mut body = String::new();
-        req.read_to_string(&mut body)?;
+    server.fn_handler(
+        "/wifi",
+        Method::Post,
+        move |mut req| -> Result<(), Esp32Error> {
+            let body = read_request_body(&mut req)?;
 
-        if let Some((ssid, password)) = parse_wifi_payload(&body) {
-            let creds = WifiCredentials { ssid, password };
-            WifiCredentials::save(&nvs_handler, &creds).map_err(Esp32Error::from)?;
+            if let Some((ssid, password)) = parse_wifi_payload(&body) {
+                let creds = WifiCredentials { ssid, password };
+                WifiCredentials::save(&nvs_handler, &creds).map_err(Esp32Error::from)?;
+                let headers = [content_type("text/plain"), cors_allow_origin()];
+                let mut response = req.into_response(200, Some("OK"), &headers)?;
+                response.write_all(b"Saved. Restarting...")?;
+
+                let mut flag = portal_state_handler.lock().map_err(|_| Esp32Error::Lock)?;
+                *flag = true;
+                return Ok(());
+            }
+
             let headers = [content_type("text/plain"), cors_allow_origin()];
-            let mut response = req.into_response(200, Some("OK"), &headers)?;
-            response.write_all(b"Saved. Restarting...")?;
-
-            let mut flag = portal_state_handler.lock().map_err(|_| Esp32Error::Lock)?;
-            *flag = true;
-            return Ok(());
-        }
-
-        let headers = [content_type("text/plain"), cors_allow_origin()];
-        let mut response = req.into_response(400, Some("Bad Request"), &headers)?;
-        response.write_all(b"Invalid payload")?;
-        Ok(())
-    })?;
+            let mut response = req.into_response(400, Some("Bad Request"), &headers)?;
+            response.write_all(b"Invalid payload")?;
+            Ok(())
+        },
+    )?;
 
     loop {
         if *portal_state.lock().map_err(|_| Esp32Error::Lock)? {
@@ -294,9 +312,13 @@ fn run_loop(
                     .wifi_mut()
                     .driver_mut()
                     .get_ap_info()
-                    .map(|info| info.rssi)
+                    .map(|info| info.signal_strength as i32)
                     .unwrap_or(-100);
-                let time = time_of_day_from_epoch(epoch, guard.controller.state.rtc.gmt_offset, guard.controller.state.rtc.dst);
+                let time = time_of_day_from_epoch(
+                    epoch,
+                    guard.controller.state.rtc.gmt_offset,
+                    guard.controller.state.rtc.dst,
+                );
                 let events = guard.controller.tick(epoch, time);
                 events
             };
@@ -335,7 +357,7 @@ fn run_loop(
 
 fn read_button(hardware: &Arc<Mutex<Hardware>>) -> Result<bool, Esp32Error> {
     let mut guard = hardware.lock().map_err(|_| Esp32Error::Lock)?;
-    Ok(guard.button.is_high().unwrap_or(false))
+    Ok(guard.button.is_high())
 }
 
 fn check_reset_requested(shared: &Arc<Mutex<SharedState>>) -> Result<bool, Esp32Error> {
@@ -441,93 +463,116 @@ fn start_http_server(
     })?;
 
     let shared_status = shared.clone();
-    server.fn_handler("/api/status", Method::Get, move |req| {
-        let (status, rssi) = {
-            let guard = shared_status.lock().map_err(|_| Esp32Error::Lock)?;
-            let response = guard
-                .controller
-                .status_response(current_epoch(), guard.rssi, API_VERSION);
-            (response, guard.rssi)
-        };
-        let body = serde_json::to_string(&status)?;
-        respond_json(req, 200, &body)?;
-        let _ = rssi;
-        Ok(())
-    })?;
+    server.fn_handler(
+        "/api/status",
+        Method::Get,
+        move |req| -> Result<(), Esp32Error> {
+            let (status, rssi) = {
+                let guard = shared_status.lock().map_err(|_| Esp32Error::Lock)?;
+                let response =
+                    guard
+                        .controller
+                        .status_response(current_epoch(), guard.rssi, API_VERSION);
+                (response, guard.rssi)
+            };
+            let body = serde_json::to_string(&status)?;
+            respond_json(req, 200, &body)?;
+            let _ = rssi;
+            Ok(())
+        },
+    )?;
 
     let shared_timer = shared.clone();
     let hardware_timer = hardware.clone();
     let storage_timer = storage.clone();
-    server.fn_handler("/api/timer", Method::Post, move |req| {
-        let timer_enabled = parse_query_bool(req.uri(), "timerEnabled").unwrap_or(false);
-        let events = {
-            let mut guard = shared_timer.lock().map_err(|_| Esp32Error::Lock)?;
-            guard.controller.apply_timer_enabled(timer_enabled)
-        };
-        apply_events(&shared_timer, &hardware_timer, &storage_timer, events)?;
-        respond_empty(req, 204)?;
-        Ok(())
-    })?;
+    server.fn_handler(
+        "/api/timer",
+        Method::Post,
+        move |req| -> Result<(), Esp32Error> {
+            let timer_enabled = parse_query_bool(req.uri(), "timerEnabled").unwrap_or(false);
+            let events = {
+                let mut guard = shared_timer.lock().map_err(|_| Esp32Error::Lock)?;
+                guard.controller.apply_timer_enabled(timer_enabled)
+            };
+            apply_events(&shared_timer, &hardware_timer, &storage_timer, events)?;
+            respond_empty(req, 204)?;
+            Ok(())
+        },
+    )?;
 
     let shared_power = shared.clone();
     let hardware_power = hardware.clone();
     let storage_power = storage.clone();
-    server.fn_handler("/api/power", Method::Post, move |mut req| {
-        let mut body = String::new();
-        req.read_to_string(&mut body)?;
-        let payload: PowerPayload = serde_json::from_str(&body)?;
-        let events = {
-            let mut guard = shared_power.lock().map_err(|_| Esp32Error::Lock)?;
-            guard.controller.apply_power(payload.winder_enabled)
-        };
-        apply_events(&shared_power, &hardware_power, &storage_power, events)?;
-        respond_empty(req, 204)?;
-        Ok(())
-    })?;
+    server.fn_handler(
+        "/api/power",
+        Method::Post,
+        move |mut req| -> Result<(), Esp32Error> {
+            let body = read_request_body(&mut req)?;
+            let payload: PowerPayload = serde_json::from_str(&body)?;
+            let events = {
+                let mut guard = shared_power.lock().map_err(|_| Esp32Error::Lock)?;
+                guard.controller.apply_power(payload.winder_enabled)
+            };
+            apply_events(&shared_power, &hardware_power, &storage_power, events)?;
+            respond_empty(req, 204)?;
+            Ok(())
+        },
+    )?;
 
     let shared_update = shared.clone();
     let hardware_update = hardware.clone();
     let storage_update = storage.clone();
-    server.fn_handler("/api/update", Method::Post, move |mut req| {
-        let mut body = String::new();
-        req.read_to_string(&mut body)?;
-        let payload: UpdatePayload = serde_json::from_str(&body)?;
-        let update: UpdateRequest = payload.try_into()?;
-        let events = {
-            let mut guard = shared_update.lock().map_err(|_| Esp32Error::Lock)?;
-            guard.controller.apply_update(update, current_epoch())
-        };
-        apply_events(&shared_update, &hardware_update, &storage_update, events)?;
-        respond_empty(req, 204)?;
-        Ok(())
-    })?;
+    server.fn_handler(
+        "/api/update",
+        Method::Post,
+        move |mut req| -> Result<(), Esp32Error> {
+            let body = read_request_body(&mut req)?;
+            let payload: UpdatePayload = serde_json::from_str(&body)?;
+            let update: UpdateRequest = payload.try_into()?;
+            let events = {
+                let mut guard = shared_update.lock().map_err(|_| Esp32Error::Lock)?;
+                guard.controller.apply_update(update, current_epoch())
+            };
+            apply_events(&shared_update, &hardware_update, &storage_update, events)?;
+            respond_empty(req, 204)?;
+            Ok(())
+        },
+    )?;
 
     let shared_reset = shared.clone();
     let hardware_reset = hardware.clone();
     let storage_reset = storage.clone();
-    server.fn_handler("/api/reset", Method::Get, move |req| {
-        let response = ResetResponse::new();
-        let body = serde_json::to_string(&response)?;
-        respond_json(req, 200, &body)?;
-        let events = {
-            let mut guard = shared_reset.lock().map_err(|_| Esp32Error::Lock)?;
-            guard.controller.request_reset()
-        };
-        apply_events(&shared_reset, &hardware_reset, &storage_reset, events)?;
-        Ok(())
-    })?;
+    server.fn_handler(
+        "/api/reset",
+        Method::Get,
+        move |req| -> Result<(), Esp32Error> {
+            let response = ResetResponse::new();
+            let body = serde_json::to_string(&response)?;
+            respond_json(req, 200, &body)?;
+            let events = {
+                let mut guard = shared_reset.lock().map_err(|_| Esp32Error::Lock)?;
+                guard.controller.request_reset()
+            };
+            apply_events(&shared_reset, &hardware_reset, &storage_reset, events)?;
+            Ok(())
+        },
+    )?;
 
     let static_storage = storage.clone();
-    server.fn_handler("/*", Method::Get, move |req| {
+    server.fn_handler("/*", Method::Get, move |req| -> Result<(), Esp32Error> {
         serve_static(req, &static_storage)
     })?;
 
     let static_storage_options = storage.clone();
-    server.fn_handler("/*", Method::Options, move |req| {
-        let _ = static_storage_options;
-        respond_empty(req, 200)?;
-        Ok(())
-    })?;
+    server.fn_handler(
+        "/*",
+        Method::Options,
+        move |req| -> Result<(), Esp32Error> {
+            let _ = static_storage_options;
+            respond_empty(req, 200)?;
+            Ok(())
+        },
+    )?;
 
     Ok(server)
 }
@@ -539,6 +584,7 @@ fn respond_json<C>(
 ) -> Result<(), Esp32Error>
 where
     C: embedded_svc::http::server::Connection,
+    Esp32Error: From<<C as embedded_svc::io::ErrorType>::Error>,
 {
     let headers = [
         content_type("application/json"),
@@ -557,8 +603,13 @@ fn respond_empty<C>(
 ) -> Result<(), Esp32Error>
 where
     C: embedded_svc::http::server::Connection,
+    Esp32Error: From<<C as embedded_svc::io::ErrorType>::Error>,
 {
-    let headers = [cors_allow_origin(), cors_allow_methods(), cors_allow_headers()];
+    let headers = [
+        cors_allow_origin(),
+        cors_allow_methods(),
+        cors_allow_headers(),
+    ];
     let mut response = req.into_response(status, Some("OK"), &headers)?;
     response.write_all(&[])?;
     Ok(())
@@ -570,6 +621,7 @@ fn serve_static<C>(
 ) -> Result<(), Esp32Error>
 where
     C: embedded_svc::http::server::Connection,
+    Esp32Error: From<<C as embedded_svc::io::ErrorType>::Error>,
 {
     let path = storage.resolve_asset(req.uri());
     match path {
@@ -614,6 +666,31 @@ fn cors_allow_headers() -> (&'static str, &'static str) {
 
 fn cache_control(value: &'static str) -> (&'static str, &'static str) {
     ("Cache-Control", value)
+}
+
+fn read_request_body<C>(
+    req: &mut embedded_svc::http::server::Request<C>,
+) -> Result<String, Esp32Error>
+where
+    C: embedded_svc::http::server::Connection,
+    Esp32Error: From<<C as embedded_svc::io::ErrorType>::Error>,
+{
+    let mut body = String::new();
+    let mut buf = [0u8; 1024];
+
+    loop {
+        let read = req.read(&mut buf)?;
+        if read == 0 {
+            break;
+        }
+
+        let chunk = std::str::from_utf8(&buf[..read]).map_err(|err| {
+            Esp32Error::InvalidConfig(format!("invalid request body utf-8: {err}"))
+        })?;
+        body.push_str(chunk);
+    }
+
+    Ok(body)
 }
 
 fn parse_query_bool(uri: &str, key: &str) -> Option<bool> {
@@ -734,7 +811,10 @@ impl Storage {
     fn new(root: &str, settings_file: &str) -> Self {
         let root = PathBuf::from(root);
         let settings_path = root.join(settings_file);
-        Self { root, settings_path }
+        Self {
+            root,
+            settings_path,
+        }
     }
 
     fn load_or_init(&self) -> Result<StoredSettings, Esp32Error> {
@@ -870,17 +950,9 @@ impl Hardware {
         #[cfg(feature = "oled")]
         let display = {
             let config = I2cConfig::new().baudrate(400.kHz().into());
-            let i2c = I2cDriver::new(
-                _i2c0,
-                pins.gpio21,
-                pins.gpio22,
-                &config,
-            )?;
+            let i2c = I2cDriver::new(_i2c0, pins.gpio21, pins.gpio22, &config)?;
             Some(OledDisplay::new(i2c)?)
         };
-
-        #[cfg(not(feature = "oled"))]
-        let display = None;
 
         Ok(Self {
             motor,
@@ -1126,14 +1198,19 @@ impl LedControl {
 
 #[cfg(feature = "oled")]
 struct OledDisplay {
-    display: Ssd1306<I2CInterface<I2cDriver<'static>>, DisplaySize128x64, ssd1306::mode::BufferedGraphicsMode<DisplaySize128x64>>,
+    display: Ssd1306<
+        I2CInterface<I2cDriver<'static>>,
+        DisplaySize128x64,
+        ssd1306::mode::BufferedGraphicsMode<DisplaySize128x64>,
+    >,
 }
 
 #[cfg(feature = "oled")]
 impl OledDisplay {
     fn new(i2c: I2cDriver<'static>) -> Result<Self, Esp32Error> {
         let interface = I2CDisplayInterface::new_custom_address(i2c, OLED_ADDR);
-        let mut display = Ssd1306::new(interface, DisplaySize128x64, DisplayRotation::Rotate0).into_buffered_graphics_mode();
+        let mut display = Ssd1306::new(interface, DisplaySize128x64, DisplayRotation::Rotate0)
+            .into_buffered_graphics_mode();
         display.init()?;
         display.set_invert(false)?;
         display.flush()?;
@@ -1187,14 +1264,22 @@ impl OledDisplay {
         Rectangle::new(Point::new(8, 25), Size::new(54, 25))
             .into_styled(PrimitiveStyle::with_fill(BinaryColor::Off))
             .draw(&mut self.display)?;
-        Text::new(&state.rotations_per_day.to_string(), Point::new(8, 30), large_style)
-            .draw(&mut self.display)?;
+        Text::new(
+            &state.rotations_per_day.to_string(),
+            Point::new(8, 30),
+            large_style,
+        )
+        .draw(&mut self.display)?;
 
         Rectangle::new(Point::new(66, 25), Size::new(62, 25))
             .into_styled(PrimitiveStyle::with_fill(BinaryColor::Off))
             .draw(&mut self.display)?;
-        Text::new(state.direction.as_api_str(), Point::new(74, 30), large_style)
-            .draw(&mut self.display)?;
+        Text::new(
+            state.direction.as_api_str(),
+            Point::new(74, 30),
+            large_style,
+        )
+        .draw(&mut self.display)?;
 
         self.draw_progress_bar(state.cycle_progress)?;
         self.draw_wifi_status(rssi, small_style)?;
@@ -1265,7 +1350,10 @@ impl OledDisplay {
             .draw(&mut self.display)?;
 
         if state.timer.enabled {
-            let text = format!("TIMER {:02}:{:02}", state.timer.start_time.hour, state.timer.start_time.minute);
+            let text = format!(
+                "TIMER {:02}:{:02}",
+                state.timer.start_time.hour, state.timer.start_time.minute
+            );
             Text::new(&text, Point::new(60, 56), style).draw(&mut self.display)?;
         }
         Ok(())
@@ -1313,7 +1401,10 @@ struct HomeAssistant {
 
 #[cfg(feature = "home-assistant")]
 impl HomeAssistant {
-    fn try_new(shared: Arc<Mutex<SharedState>>, _storage: Arc<Storage>) -> Result<Option<Self>, Esp32Error> {
+    fn try_new(
+        shared: Arc<Mutex<SharedState>>,
+        _storage: Arc<Storage>,
+    ) -> Result<Option<Self>, Esp32Error> {
         let broker = env_or_build("HOME_ASSISTANT_BROKER", HA_BROKER_ENV).unwrap_or_default();
         if broker.is_empty() {
             warn!("HOME_ASSISTANT_BROKER not set; skipping MQTT");
@@ -1333,7 +1424,12 @@ impl HomeAssistant {
         let url = format!("mqtt://{}", broker);
         let tx = command_tx.clone();
         let client = EspMqttClient::new_cb(&url, &config, move |event| {
-            if let EventPayload::Received { topic: Some(topic), data, .. } = event.payload() {
+            if let EventPayload::Received {
+                topic: Some(topic),
+                data,
+                ..
+            } = event.payload()
+            {
                 if let Some(command) = HaCommand::parse(topic, data) {
                     let _ = tx.send(command);
                 }
@@ -1368,16 +1464,21 @@ impl HomeAssistant {
         let guard = shared.lock().map_err(|_| Esp32Error::Lock)?;
         let config_messages = ha_config_messages(&self.device_id, &guard.controller.state);
         for (topic, payload) in config_messages {
-            let _ = self.client.publish(&topic, QoS::AtMostOnce, true, payload.as_bytes());
+            let _ = self
+                .client
+                .publish(&topic, QoS::AtMostOnce, true, payload.as_bytes());
         }
         Ok(())
     }
 
     fn publish_state(&mut self, shared: &Arc<Mutex<SharedState>>) -> Result<(), Esp32Error> {
         let guard = shared.lock().map_err(|_| Esp32Error::Lock)?;
-        let state_messages = ha_state_messages(&self.device_id, &guard.controller.state, guard.rssi);
+        let state_messages =
+            ha_state_messages(&self.device_id, &guard.controller.state, guard.rssi);
         for (topic, payload) in state_messages {
-            let _ = self.client.publish(&topic, QoS::AtMostOnce, false, payload.as_bytes());
+            let _ = self
+                .client
+                .publish(&topic, QoS::AtMostOnce, false, payload.as_bytes());
         }
         Ok(())
     }
@@ -1401,7 +1502,9 @@ impl HomeAssistant {
 
 #[cfg(feature = "home-assistant")]
 fn env_or_build(key: &str, build_value: Option<&'static str>) -> Option<String> {
-    std::env::var(key).ok().or_else(|| build_value.map(|value| value.to_string()))
+    std::env::var(key)
+        .ok()
+        .or_else(|| build_value.map(|value| value.to_string()))
 }
 
 #[cfg(feature = "home-assistant")]
@@ -1523,7 +1626,9 @@ impl HaCommand {
             HaCommand::Timer(enabled) => controller.apply_timer_enabled(enabled),
             HaCommand::Oled(enabled) => {
                 controller.state.screen.sleep = !enabled;
-                vec![ControllerEvent::PersistSettings(StoredSettings::from_runtime(&controller.state))]
+                vec![ControllerEvent::PersistSettings(Box::new(
+                    StoredSettings::from_runtime(&controller.state),
+                ))]
             }
             HaCommand::Start => {
                 let now = current_epoch();
@@ -1544,7 +1649,9 @@ impl HaCommand {
                     Direction::CounterClockwise => MotorDirection::CounterClockwise,
                     Direction::Both => controller.state.motor_direction,
                 };
-                vec![ControllerEvent::PersistSettings(StoredSettings::from_runtime(&controller.state))]
+                vec![ControllerEvent::PersistSettings(Box::new(
+                    StoredSettings::from_runtime(&controller.state),
+                ))]
             }
             HaCommand::Rpd(rpd) => {
                 controller.state.rotations_per_day = rpd;
@@ -1552,19 +1659,25 @@ impl HaCommand {
                     controller.state.routine.estimated_finish_epoch =
                         current_epoch() + calculate_winding_duration_secs(&controller.state);
                 }
-                vec![ControllerEvent::PersistSettings(StoredSettings::from_runtime(&controller.state))]
+                vec![ControllerEvent::PersistSettings(Box::new(
+                    StoredSettings::from_runtime(&controller.state),
+                ))]
             }
             HaCommand::Hour(hour) => {
                 if let Ok(time) = TimeOfDay::new(hour, controller.state.timer.start_time.minute) {
                     controller.state.timer.start_time = time;
                 }
-                vec![ControllerEvent::PersistSettings(StoredSettings::from_runtime(&controller.state))]
+                vec![ControllerEvent::PersistSettings(Box::new(
+                    StoredSettings::from_runtime(&controller.state),
+                ))]
             }
             HaCommand::Minute(minute) => {
                 if let Ok(time) = TimeOfDay::new(controller.state.timer.start_time.hour, minute) {
                     controller.state.timer.start_time = time;
                 }
-                vec![ControllerEvent::PersistSettings(StoredSettings::from_runtime(&controller.state))]
+                vec![ControllerEvent::PersistSettings(Box::new(
+                    StoredSettings::from_runtime(&controller.state),
+                ))]
             }
             HaCommand::CustomWindDuration(duration) => {
                 controller.state.custom_wind_duration_secs = duration;
@@ -1572,7 +1685,9 @@ impl HaCommand {
                     controller.state.routine.estimated_finish_epoch =
                         current_epoch() + calculate_winding_duration_secs(&controller.state);
                 }
-                vec![ControllerEvent::PersistSettings(StoredSettings::from_runtime(&controller.state))]
+                vec![ControllerEvent::PersistSettings(Box::new(
+                    StoredSettings::from_runtime(&controller.state),
+                ))]
             }
             HaCommand::CustomWindPause(duration) => {
                 controller.state.custom_wind_pause_secs = duration;
@@ -1580,7 +1695,9 @@ impl HaCommand {
                     controller.state.routine.estimated_finish_epoch =
                         current_epoch() + calculate_winding_duration_secs(&controller.state);
                 }
-                vec![ControllerEvent::PersistSettings(StoredSettings::from_runtime(&controller.state))]
+                vec![ControllerEvent::PersistSettings(Box::new(
+                    StoredSettings::from_runtime(&controller.state),
+                ))]
             }
             HaCommand::RotationDuration(duration) => {
                 controller.state.rotation_duration_secs = duration;
@@ -1588,49 +1705,71 @@ impl HaCommand {
                     controller.state.routine.estimated_finish_epoch =
                         current_epoch() + calculate_winding_duration_secs(&controller.state);
                 }
-                vec![ControllerEvent::PersistSettings(StoredSettings::from_runtime(&controller.state))]
+                vec![ControllerEvent::PersistSettings(Box::new(
+                    StoredSettings::from_runtime(&controller.state),
+                ))]
             }
             HaCommand::RtcOffset(offset) => {
                 controller.state.rtc.gmt_offset = offset;
                 vec![
                     ControllerEvent::SyncTime,
-                    ControllerEvent::PersistSettings(StoredSettings::from_runtime(&controller.state)),
+                    ControllerEvent::PersistSettings(Box::new(StoredSettings::from_runtime(
+                        &controller.state,
+                    ))),
                 ]
             }
             HaCommand::RtcDst(dst) => {
                 controller.state.rtc.dst = dst;
                 vec![
                     ControllerEvent::SyncTime,
-                    ControllerEvent::PersistSettings(StoredSettings::from_runtime(&controller.state)),
+                    ControllerEvent::PersistSettings(Box::new(StoredSettings::from_runtime(
+                        &controller.state,
+                    ))),
                 ]
             }
             HaCommand::ScreenScheduleEnabled(enabled) => {
                 controller.state.screen.schedule.enabled = enabled;
-                vec![ControllerEvent::PersistSettings(StoredSettings::from_runtime(&controller.state))]
+                vec![ControllerEvent::PersistSettings(Box::new(
+                    StoredSettings::from_runtime(&controller.state),
+                ))]
             }
             HaCommand::ScreenScheduleStartHour(hour) => {
-                if let Ok(time) = TimeOfDay::new(hour, controller.state.screen.schedule.start.minute) {
+                if let Ok(time) =
+                    TimeOfDay::new(hour, controller.state.screen.schedule.start.minute)
+                {
                     controller.state.screen.schedule.start = time;
                 }
-                vec![ControllerEvent::PersistSettings(StoredSettings::from_runtime(&controller.state))]
+                vec![ControllerEvent::PersistSettings(Box::new(
+                    StoredSettings::from_runtime(&controller.state),
+                ))]
             }
             HaCommand::ScreenScheduleStartMinute(minute) => {
-                if let Ok(time) = TimeOfDay::new(controller.state.screen.schedule.start.hour, minute) {
+                if let Ok(time) =
+                    TimeOfDay::new(controller.state.screen.schedule.start.hour, minute)
+                {
                     controller.state.screen.schedule.start = time;
                 }
-                vec![ControllerEvent::PersistSettings(StoredSettings::from_runtime(&controller.state))]
+                vec![ControllerEvent::PersistSettings(Box::new(
+                    StoredSettings::from_runtime(&controller.state),
+                ))]
             }
             HaCommand::ScreenScheduleEndHour(hour) => {
-                if let Ok(time) = TimeOfDay::new(hour, controller.state.screen.schedule.end.minute) {
+                if let Ok(time) = TimeOfDay::new(hour, controller.state.screen.schedule.end.minute)
+                {
                     controller.state.screen.schedule.end = time;
                 }
-                vec![ControllerEvent::PersistSettings(StoredSettings::from_runtime(&controller.state))]
+                vec![ControllerEvent::PersistSettings(Box::new(
+                    StoredSettings::from_runtime(&controller.state),
+                ))]
             }
             HaCommand::ScreenScheduleEndMinute(minute) => {
-                if let Ok(time) = TimeOfDay::new(controller.state.screen.schedule.end.hour, minute) {
+                if let Ok(time) = TimeOfDay::new(controller.state.screen.schedule.end.hour, minute)
+                {
                     controller.state.screen.schedule.end = time;
                 }
-                vec![ControllerEvent::PersistSettings(StoredSettings::from_runtime(&controller.state))]
+                vec![ControllerEvent::PersistSettings(Box::new(
+                    StoredSettings::from_runtime(&controller.state),
+                ))]
             }
         }
     }
@@ -1666,7 +1805,10 @@ fn parse_bool(value: &str) -> bool {
 fn mac_suffix() -> String {
     unsafe {
         let mut mac = [0u8; 6];
-        esp_idf_sys::esp_read_mac(mac.as_mut_ptr(), esp_idf_sys::esp_mac_type_t_ESP_MAC_WIFI_STA);
+        esp_idf_sys::esp_read_mac(
+            mac.as_mut_ptr(),
+            esp_idf_sys::esp_mac_type_t_ESP_MAC_WIFI_STA,
+        );
         format!("{:02X}{:02X}{:02X}", mac[3], mac[4], mac[5])
     }
 }
@@ -1771,25 +1913,78 @@ fn ha_config_messages(device_id: &str, _state: &RuntimeState) -> Vec<(String, St
 fn ha_state_messages(device_id: &str, state: &RuntimeState, rssi: i32) -> Vec<(String, String)> {
     let base = format!("winderoo/{device_id}");
     vec![
-        (format!("{base}/power"), if state.winder_enabled { "ON" } else { "OFF" }.to_string()),
-        (format!("{base}/timer"), if state.timer.enabled { "ON" } else { "OFF" }.to_string()),
-        (format!("{base}/oled"), if state.screen.sleep { "OFF" } else { "ON" }.to_string()),
+        (
+            format!("{base}/power"),
+            if state.winder_enabled { "ON" } else { "OFF" }.to_string(),
+        ),
+        (
+            format!("{base}/timer"),
+            if state.timer.enabled { "ON" } else { "OFF" }.to_string(),
+        ),
+        (
+            format!("{base}/oled"),
+            if state.screen.sleep { "OFF" } else { "ON" }.to_string(),
+        ),
         (format!("{base}/status"), state.status_str().to_string()),
         (format!("{base}/rssi"), rssi.to_string()),
-        (format!("{base}/direction"), state.direction.as_api_str().to_string()),
+        (
+            format!("{base}/direction"),
+            state.direction.as_api_str().to_string(),
+        ),
         (format!("{base}/rpd"), state.rotations_per_day.to_string()),
-        (format!("{base}/hour"), format!("{:02}", state.timer.start_time.hour)),
-        (format!("{base}/minute"), format!("{:02}", state.timer.start_time.minute)),
-        (format!("{base}/custom_wind_duration"), state.custom_wind_duration_secs.to_string()),
-        (format!("{base}/custom_wind_pause"), state.custom_wind_pause_secs.to_string()),
-        (format!("{base}/rotation_duration"), state.rotation_duration_secs.to_string()),
-        (format!("{base}/rtc_offset"), state.rtc.gmt_offset.to_string()),
-        (format!("{base}/rtc_dst"), if state.rtc.dst { "ON" } else { "OFF" }.to_string()),
-        (format!("{base}/screen_schedule_enabled"), if state.screen.schedule.enabled { "ON" } else { "OFF" }.to_string()),
-        (format!("{base}/screen_schedule_start_hour"), format!("{:02}", state.screen.schedule.start.hour)),
-        (format!("{base}/screen_schedule_start_minute"), format!("{:02}", state.screen.schedule.start.minute)),
-        (format!("{base}/screen_schedule_end_hour"), format!("{:02}", state.screen.schedule.end.hour)),
-        (format!("{base}/screen_schedule_end_minute"), format!("{:02}", state.screen.schedule.end.minute)),
+        (
+            format!("{base}/hour"),
+            format!("{:02}", state.timer.start_time.hour),
+        ),
+        (
+            format!("{base}/minute"),
+            format!("{:02}", state.timer.start_time.minute),
+        ),
+        (
+            format!("{base}/custom_wind_duration"),
+            state.custom_wind_duration_secs.to_string(),
+        ),
+        (
+            format!("{base}/custom_wind_pause"),
+            state.custom_wind_pause_secs.to_string(),
+        ),
+        (
+            format!("{base}/rotation_duration"),
+            state.rotation_duration_secs.to_string(),
+        ),
+        (
+            format!("{base}/rtc_offset"),
+            state.rtc.gmt_offset.to_string(),
+        ),
+        (
+            format!("{base}/rtc_dst"),
+            if state.rtc.dst { "ON" } else { "OFF" }.to_string(),
+        ),
+        (
+            format!("{base}/screen_schedule_enabled"),
+            if state.screen.schedule.enabled {
+                "ON"
+            } else {
+                "OFF"
+            }
+            .to_string(),
+        ),
+        (
+            format!("{base}/screen_schedule_start_hour"),
+            format!("{:02}", state.screen.schedule.start.hour),
+        ),
+        (
+            format!("{base}/screen_schedule_start_minute"),
+            format!("{:02}", state.screen.schedule.start.minute),
+        ),
+        (
+            format!("{base}/screen_schedule_end_hour"),
+            format!("{:02}", state.screen.schedule.end.hour),
+        ),
+        (
+            format!("{base}/screen_schedule_end_minute"),
+            format!("{:02}", state.screen.schedule.end.minute),
+        ),
         (format!("{base}/rtc_epoch"), current_epoch().to_string()),
     ]
 }

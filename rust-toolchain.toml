@@ -1,0 +1,11 @@
+[toolchain]
+# ESP32 (Xtensa) builds require the esp-rs Rust fork/toolchain installed via `espup`.
+# Keeping this in-repo makes `cargo`, `rust-analyzer`, and CI consistently use the
+# same toolchain when working in this repository.
+channel = "esp"
+
+# Needed for rust-analyzer "Go to definition" into `std` and for a good IDE experience.
+components = ["rust-src", "rustfmt", "clippy"]
+
+# Target for ESP32 DevKit v1 (ESP32-WROOM-32) using ESP-IDF.
+targets = ["xtensa-esp32-espidf"]

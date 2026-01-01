@@ -1,0 +1,36 @@
+# Cargo configuration for the ESP32 (ESP-IDF) firmware crate.
+#
+# IMPORTANT: We intentionally do NOT set a default `build.target` here so that
+# host-side `cargo test` continues to work without needing a device.
+
+[target.xtensa-esp32-espidf]
+# `cargo run --release --target xtensa-esp32-espidf -F esp32` will flash + monitor.
+runner = "espflash flash --monitor"
+
+# ESP-IDF builds use `ldproxy` to invoke the correct linker + ESP-IDF glue.
+linker = "ldproxy"
+
+# ESP-IDF v5 uses 64-bit `time_t` by default. This matches `esp-idf-sys` expectations.
+rustflags = ["--cfg", "espidf_time64"]
+
+[env]
+# Ensure ESP-IDF picks up our repo-provided defaults when building the firmware.
+ESP_IDF_SDKCONFIG_DEFAULTS = "sdkconfig.defaults"
+
+# The ESP-IDF CMake project is generated into `OUT_DIR` by `esp-idf-sys`.
+# Copy our custom partition table there so `CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"`
+# resolves correctly during the ESP-IDF build.
+ESP_IDF_GLOB_BASE = { value = ".", relative = true }
+ESP_IDF_GLOB_PARTITIONS = "partitions.csv"
+
+[alias]
+# Build (device)
+esp32-build = "build -Z build-std=std,panic_abort -Z build-std-features=panic_immediate_abort --release --target xtensa-esp32-espidf -F esp32"
+
+# Flash + monitor (device) - uses the `runner` above
+esp32-run = "run -Z build-std=std,panic_abort -Z build-std-features=panic_immediate_abort --release --target xtensa-esp32-espidf -F esp32"
+esp32 = "run -Z build-std=std,panic_abort -Z build-std-features=panic_immediate_abort --release --target xtensa-esp32-espidf -F esp32"
+
+# Fast checks (device)
+esp32-check = "check -Z build-std=std,panic_abort -Z build-std-features=panic_immediate_abort --target xtensa-esp32-espidf -F esp32"
+esp32-clippy = "clippy -Z build-std=std,panic_abort -Z build-std-features=panic_immediate_abort --target xtensa-esp32-espidf -F esp32"

@@ -1,4 +1,10 @@
 # Winderoo ESP-IDF defaults (ESP32 DevKit v1)
+#
+# The ESP32 DevKit v1 / WROOM-32 modules are typically 4MB flash, and our custom
+# partition table expects 4MB (app0/app1 OTA + LittleFS).
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE_DETECT=n
+
 CONFIG_ESP_HTTP_SERVER=y
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
 CONFIG_HTTPD_MAX_URI_LEN=512
