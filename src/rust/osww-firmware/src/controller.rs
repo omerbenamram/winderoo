@@ -75,13 +75,11 @@ impl<R: RandomSource> Controller<R> {
             self.state.cycle_progress = 0.0;
             events.push(ControllerEvent::MotorStop);
             events.push(ControllerEvent::DisplayClear);
-        } else {
-            if self.state.screen.equipped && !self.state.screen.sleep {
-                events.push(ControllerEvent::DisplayStatic {
-                    title: self.state.status_str().to_string(),
-                });
-                events.push(ControllerEvent::DisplayDynamic);
-            }
+        } else if self.state.screen.equipped && !self.state.screen.sleep {
+            events.push(ControllerEvent::DisplayStatic {
+                title: self.state.status_str().to_string(),
+            });
+            events.push(ControllerEvent::DisplayDynamic);
         }
         events.push(ControllerEvent::PersistSettings(
             StoredSettings::from_runtime(&self.state),
@@ -95,8 +93,8 @@ impl<R: RandomSource> Controller<R> {
         let original_direction = self.state.direction;
         let original_rotations = self.state.rotations_per_day;
 
-        self.state.timer.start_time = TimeOfDay::new(update.hour, update.minutes)
-            .unwrap_or_else(|_| self.state.timer.start_time);
+        self.state.timer.start_time =
+            TimeOfDay::new(update.hour, update.minutes).unwrap_or(self.state.timer.start_time);
         self.state.timer.enabled = update.timer_enabled;
         self.state.custom_wind_duration_secs = update.custom_wind_duration_secs;
         self.state.custom_wind_pause_secs = update.custom_wind_pause_secs;
@@ -160,6 +158,14 @@ impl<R: RandomSource> Controller<R> {
             StoredSettings::from_runtime(&self.state),
         ));
         events
+    }
+
+    /// Resume winding if the persisted status indicates an active routine.
+    pub fn resume_if_needed(&mut self, now_epoch: u64) -> Vec<ControllerEvent> {
+        if matches!(self.state.status, WinderStatus::Winding) && self.state.winder_enabled {
+            return self.begin_winding(now_epoch);
+        }
+        Vec::new()
     }
 
     /// Handle the periodic loop tick.

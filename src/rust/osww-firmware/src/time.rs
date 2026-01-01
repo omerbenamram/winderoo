@@ -66,6 +66,19 @@ impl TimeOfDay {
     }
 }
 
+/// Convert a UTC epoch into a local [`TimeOfDay`] using a GMT offset and DST flag.
+pub fn time_of_day_from_epoch(epoch: u64, gmt_offset: f32, dst: bool) -> TimeOfDay {
+    let mut offset_secs = (gmt_offset * 3600.0).round() as i64;
+    if dst {
+        offset_secs += 3600;
+    }
+    let adjusted = epoch as i64 + offset_secs;
+    let seconds_in_day = ((adjusted % 86_400) + 86_400) % 86_400;
+    let hour = (seconds_in_day / 3600) as u8;
+    let minute = ((seconds_in_day % 3600) / 60) as u8;
+    TimeOfDay::new(hour, minute).unwrap_or(TimeOfDay { hour: 0, minute: 0 })
+}
+
 impl fmt::Display for TimeOfDay {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.to_hh_mm())
@@ -96,5 +109,20 @@ mod tests {
     fn total_minutes() {
         let time = TimeOfDay::new(2, 30).unwrap();
         assert_eq!(time.total_minutes(), 150);
+    }
+
+    #[test]
+    fn epoch_to_time_of_day_with_offset() {
+        // 01:30 UTC, offset +2 => 03:30
+        let time = time_of_day_from_epoch(90 * 60, 2.0, false);
+        assert_eq!(time, TimeOfDay::new(3, 30).unwrap());
+    }
+
+    #[test]
+    fn epoch_to_time_of_day_with_dst() {
+        // 23:30 UTC, offset -5 with DST => 19:30
+        let epoch = 23 * 3600 + 30 * 60;
+        let time = time_of_day_from_epoch(epoch, -5.0, true);
+        assert_eq!(time, TimeOfDay::new(19, 30).unwrap());
     }
 }

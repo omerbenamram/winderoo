@@ -4,11 +4,20 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 
+[[package.metadata.esp-idf-sys.extra_components]]
+remote_component = { name = "joltwallet/littlefs", version = "1.14" }
+
 [features]
 # Enable ESP32 runtime integration. Keep off for host tests.
-esp32 = ["dep:esp-idf-sys", "dep:esp-idf-svc", "dep:esp-idf-hal", "dep:embedded-svc"]
+esp32 = [
+    "dep:embedded-svc",
+    "dep:esp-idf-hal",
+    "dep:esp-idf-svc",
+    "dep:esp-idf-sys",
+    "dep:log",
+]
 # Optional hardware features to mirror the C++ build flags.
-oled = []
+oled = ["dep:display-interface-i2c", "dep:embedded-graphics", "dep:ssd1306"]
 home-assistant = []
 pwm-motor = []
 
@@ -16,12 +25,17 @@ pwm-motor = []
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "1.0"
+log = { version = "0.4", optional = true }
+display-interface-i2c = { version = "0.5", optional = true }
+embedded-graphics = { version = "0.8", optional = true }
+ssd1306 = { version = "0.8", optional = true }
+heapless = "0.8"
 
 # ESP32-only dependencies
-esp-idf-sys = { version = "0.33.7", optional = true }
-esp-idf-svc = { version = "0.47", optional = true }
-esp-idf-hal = { version = "0.42.5", optional = true }
-embedded-svc = { version = "0.27", optional = true }
+esp-idf-sys = { version = "0.36.1", optional = true }
+esp-idf-svc = { version = "0.51.0", optional = true }
+esp-idf-hal = { version = "0.45.2", optional = true }
+embedded-svc = { version = "0.28.1", optional = true }
 
 [dev-dependencies]
 serde_json = "1.0"

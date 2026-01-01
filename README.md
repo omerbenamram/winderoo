@@ -64,6 +64,9 @@
 1. [Software Installation](./docs/install-software.md)
 1. [Winderoo Wiring Diagram](./docs/wiring-diagram.md)
 
+## Rust ESP32 Firmware (ESP-IDF)
+- [Rust ESP32 build + flash guide](./docs/rust-esp32.md)
+
 
 ## Contributing
 This project welcomes contributions. Please follow the regular git workflow; fork + PR to contribute.

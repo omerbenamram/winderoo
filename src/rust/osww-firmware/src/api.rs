@@ -139,21 +139,24 @@ where
 }
 
 fn parse_u16(field: &'static str, value: &str) -> Result<u16, ApiError> {
-    value
-        .parse::<u16>()
-        .map_err(|_| ApiError::InvalidNumber { field, value: value.to_string() })
+    value.parse::<u16>().map_err(|_| ApiError::InvalidNumber {
+        field,
+        value: value.to_string(),
+    })
 }
 
 fn parse_u32(field: &'static str, value: &str) -> Result<u32, ApiError> {
-    value
-        .parse::<u32>()
-        .map_err(|_| ApiError::InvalidNumber { field, value: value.to_string() })
+    value.parse::<u32>().map_err(|_| ApiError::InvalidNumber {
+        field,
+        value: value.to_string(),
+    })
 }
 
 fn parse_u8(field: &'static str, value: &str) -> Result<u8, ApiError> {
-    value
-        .parse::<u8>()
-        .map_err(|_| ApiError::InvalidNumber { field, value: value.to_string() })
+    value.parse::<u8>().map_err(|_| ApiError::InvalidNumber {
+        field,
+        value: value.to_string(),
+    })
 }
 
 /// Parsed update action values.
@@ -212,7 +215,10 @@ pub struct UpdatePayload {
     #[serde(rename = "customWindDuration", deserialize_with = "de_string_from_any")]
     pub custom_wind_duration: String,
     /// Custom pause duration (seconds).
-    #[serde(rename = "customWindPauseDuration", deserialize_with = "de_string_from_any")]
+    #[serde(
+        rename = "customWindPauseDuration",
+        deserialize_with = "de_string_from_any"
+    )]
     pub custom_wind_pause_duration: String,
     /// Rotation duration (seconds).
     #[serde(
@@ -279,16 +285,25 @@ impl TryFrom<UpdatePayload> for UpdateRequest {
             other => return Err(ApiError::InvalidFlag(other.to_string())),
         };
         let screen_schedule_start = match value.screen_schedule_start_time {
-            Some(text) => Some(TimeOfDay::parse_hh_mm(&text).map_err(|_| ApiError::InvalidTime(text))?),
+            Some(text) => {
+                Some(TimeOfDay::parse_hh_mm(&text).map_err(|_| ApiError::InvalidTime(text))?)
+            }
             None => None,
         };
         let screen_schedule_end = match value.screen_schedule_end_time {
-            Some(text) => Some(TimeOfDay::parse_hh_mm(&text).map_err(|_| ApiError::InvalidTime(text))?),
+            Some(text) => {
+                Some(TimeOfDay::parse_hh_mm(&text).map_err(|_| ApiError::InvalidTime(text))?)
+            }
             None => None,
         };
-        let custom_wind_duration_secs = parse_u32("customWindDuration", &value.custom_wind_duration)?;
-        let custom_wind_pause_secs = parse_u32("customWindPauseDuration", &value.custom_wind_pause_duration)?;
-        let rotation_duration_secs = parse_u16("customDurationInSecondsToCompleteOneRevolution", &value.rotation_duration_secs)?;
+        let custom_wind_duration_secs =
+            parse_u32("customWindDuration", &value.custom_wind_duration)?;
+        let custom_wind_pause_secs =
+            parse_u32("customWindPauseDuration", &value.custom_wind_pause_duration)?;
+        let rotation_duration_secs = parse_u16(
+            "customDurationInSecondsToCompleteOneRevolution",
+            &value.rotation_duration_secs,
+        )?;
 
         Ok(Self {
             direction,
@@ -385,7 +400,12 @@ pub struct StatusResponse {
 
 impl StatusResponse {
     /// Build a status response from runtime state.
-    pub fn from_state(state: &RuntimeState, current_epoch: u64, rssi: i32, api_version: &str) -> Self {
+    pub fn from_state(
+        state: &RuntimeState,
+        current_epoch: u64,
+        rssi: i32,
+        api_version: &str,
+    ) -> Self {
         Self {
             status: state.status_str().to_string(),
             rotations_per_day: state.rotations_per_day.to_string(),
@@ -395,8 +415,16 @@ impl StatusResponse {
             start_time_epoch: state.routine.start_epoch,
             current_time_epoch: current_epoch,
             estimated_routine_finish_epoch: state.routine.estimated_finish_epoch,
-            winder_enabled: if state.winder_enabled { "1".to_string() } else { "0".to_string() },
-            timer_enabled: if state.timer.enabled { "1".to_string() } else { "0".to_string() },
+            winder_enabled: if state.winder_enabled {
+                "1".to_string()
+            } else {
+                "0".to_string()
+            },
+            timer_enabled: if state.timer.enabled {
+                "1".to_string()
+            } else {
+                "0".to_string()
+            },
             db: rssi,
             screen_sleep: state.screen.sleep,
             screen_equipped: state.screen.equipped,
@@ -442,6 +470,103 @@ pub fn status_string(status: &WinderStatus) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{
+        Direction, MotorDirection, RoutineState, RtcConfig, ScreenSchedule, ScreenState,
+        TimerConfig, WinderStatus,
+    };
+
+    fn base_state() -> RuntimeState {
+        RuntimeState {
+            status: WinderStatus::Stopped,
+            rotations_per_day: 220,
+            direction: Direction::Both,
+            motor_direction: MotorDirection::CounterClockwise,
+            timer: TimerConfig {
+                enabled: true,
+                start_time: TimeOfDay::new(9, 30).unwrap(),
+            },
+            winder_enabled: true,
+            custom_wind_duration_secs: 180,
+            custom_wind_pause_secs: 15,
+            rotation_duration_secs: 8,
+            rtc: RtcConfig {
+                gmt_offset: -5.0,
+                dst: true,
+            },
+            screen: ScreenState {
+                equipped: true,
+                sleep: false,
+                schedule: ScreenSchedule {
+                    enabled: true,
+                    start: TimeOfDay::new(8, 0).unwrap(),
+                    end: TimeOfDay::new(17, 0).unwrap(),
+                },
+            },
+            routine: RoutineState::idle(),
+            cycle_progress: 0.25,
+        }
+    }
+
+    #[test]
+    fn update_payload_parses_mixed_types() {
+        let json = r#"
+        {
+            "rotationDirection": "CW",
+            "tpd": 240,
+            "action": "START",
+            "hour": 7,
+            "minutes": "05",
+            "timerEnabled": 1,
+            "screenSleep": false,
+            "screenScheduleEnabled": true,
+            "screenScheduleStartTime": "09:00",
+            "screenScheduleEndTime": "17:00",
+            "customWindDuration": 180,
+            "customWindPauseDuration": "15",
+            "customDurationInSecondsToCompleteOneRevolution": 8,
+            "rtcGmtOffset": -4.0,
+            "rtcDST": true
+        }
+        "#;
+
+        let payload: UpdatePayload = serde_json::from_str(json).expect("payload");
+        let request = UpdateRequest::try_from(payload).expect("request");
+
+        assert_eq!(request.direction, Direction::Clockwise);
+        assert_eq!(request.rotations_per_day, 240);
+        assert_eq!(request.hour, 7);
+        assert_eq!(request.minutes, 5);
+        assert!(request.timer_enabled);
+        assert_eq!(request.custom_wind_duration_secs, 180);
+        assert_eq!(request.custom_wind_pause_secs, 15);
+        assert_eq!(request.rotation_duration_secs, 8);
+        assert_eq!(request.rtc_gmt_offset, -4.0);
+        assert!(request.rtc_dst);
+        assert_eq!(
+            request.screen_schedule_start.unwrap(),
+            TimeOfDay::new(9, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn power_payload_accepts_numeric() {
+        let json = r#"{ "winderEnabled": 0 }"#;
+        let payload: PowerPayload = serde_json::from_str(json).expect("payload");
+        assert!(!payload.winder_enabled);
+    }
+
+    #[test]
+    fn status_response_formats_state() {
+        let state = base_state();
+        let response = StatusResponse::from_state(&state, 1000, -42, "4.0.1");
+        assert_eq!(response.status, "Stopped");
+        assert_eq!(response.rotations_per_day, "220");
+        assert_eq!(response.direction, "BOTH");
+        assert_eq!(response.hour, "09");
+        assert_eq!(response.minutes, "30");
+        assert_eq!(response.timer_enabled, "1");
+        assert_eq!(response.screen_schedule_start_time, "08:00");
+    }
 
     #[test]
     fn update_payload_parses_strings() {

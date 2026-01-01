@@ -4,6 +4,8 @@
 
 > [!IMPORTANT]
 > This project is an add-on to your already built [Open Source Watch Winder (OSWW)](https://github.com/mwood77/osww).
+>
+> Building the Rust ESP-IDF firmware? Use the Rust guide instead: [Rust ESP32 build + flash](./rust-esp32.md).
 
 - This project requires a microncontroller which replaces the Pi Pico used in the OSWW.
 - The Raspberry Pi Pico is incompatible with this project and must be swapped.
