@@ -18,3 +18,6 @@ Thumbs.db
 
 # ignore src/rust/osww-firmware/target/*
 src/rust/osww-firmware/target/*
+
+# Local external references (not part of this repo)
+externals/
