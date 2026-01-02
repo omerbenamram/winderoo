@@ -1,0 +1,775 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Winderoo Simulator</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+      :root {
+        --bg-primary: #0a0a0f;
+        --bg-secondary: #12121a;
+        --bg-tertiary: #1a1a24;
+        --bg-card: #16161f;
+        --border: #2a2a3a;
+        --text-primary: #f0f0f5;
+        --text-secondary: #8888a0;
+        --text-muted: #555566;
+        --accent: #6366f1;
+        --accent-hover: #818cf8;
+        --success: #22c55e;
+        --warning: #f59e0b;
+        --danger: #ef4444;
+        --oled-glow: #00ffaa;
+      }
+
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      body {
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+        background: var(--bg-primary);
+        color: var(--text-primary);
+        min-height: 100vh;
+        overflow-x: hidden;
+      }
+
+      .app {
+        display: grid;
+        grid-template-columns: 1fr 280px 400px;
+        grid-template-rows: auto 1fr;
+        min-height: 100vh;
+        gap: 1px;
+        background: var(--border);
+      }
+
+      /* Header */
+      header {
+        grid-column: 1 / -1;
+        background: var(--bg-secondary);
+        padding: 16px 24px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        border-bottom: 1px solid var(--border);
+      }
+
+      .logo {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+
+      .logo h1 {
+        font-size: 18px;
+        font-weight: 700;
+        background: linear-gradient(135deg, var(--accent), var(--oled-glow));
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+      }
+
+      .logo .badge {
+        font-size: 10px;
+        padding: 3px 8px;
+        background: var(--bg-tertiary);
+        border: 1px solid var(--border);
+        border-radius: 20px;
+        color: var(--text-secondary);
+        font-weight: 500;
+      }
+
+      .time-display {
+        display: flex;
+        gap: 24px;
+        align-items: center;
+      }
+
+      .time-display .item {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-end;
+      }
+
+      .time-display .label {
+        font-size: 10px;
+        color: var(--text-secondary);
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+      }
+
+      .time-display .value {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 14px;
+        color: var(--text-primary);
+      }
+
+      .controls {
+        display: flex;
+        gap: 8px;
+      }
+
+      /* 3D View Panel */
+      .view-3d {
+        background: var(--bg-primary);
+        position: relative;
+        overflow: hidden;
+      }
+
+      #three-canvas {
+        width: 100%;
+        height: 100%;
+        display: block;
+      }
+
+      .view-3d-overlay {
+        position: absolute;
+        bottom: 20px;
+        left: 20px;
+        display: flex;
+        gap: 8px;
+      }
+
+      /* OLED Panel */
+      .oled-panel {
+        background: var(--bg-secondary);
+        display: flex;
+        flex-direction: column;
+        padding: 20px;
+      }
+
+      .oled-panel h2 {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        color: var(--text-secondary);
+        margin-bottom: 16px;
+      }
+
+      .oled-frame {
+        background: #000;
+        border-radius: 8px;
+        padding: 12px;
+        border: 2px solid #1a1a1a;
+        box-shadow: 
+          inset 0 0 20px rgba(0, 255, 170, 0.05),
+          0 0 30px rgba(0, 0, 0, 0.5);
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .oled-screen {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        padding: 16px;
+        font-family: 'JetBrains Mono', monospace;
+        color: var(--oled-glow);
+        text-shadow: 0 0 10px var(--oled-glow);
+        min-height: 200px;
+      }
+
+      .oled-screen.off {
+        opacity: 0.1;
+      }
+
+      .oled-screen .status {
+        font-size: 24px;
+        font-weight: 600;
+        margin-bottom: 12px;
+        text-align: center;
+      }
+
+      .oled-screen .progress-bar {
+        height: 8px;
+        background: rgba(0, 255, 170, 0.1);
+        border-radius: 4px;
+        margin: 12px 0;
+        overflow: hidden;
+      }
+
+      .oled-screen .progress-bar .fill {
+        height: 100%;
+        background: var(--oled-glow);
+        border-radius: 4px;
+        transition: width 0.3s ease;
+        box-shadow: 0 0 10px var(--oled-glow);
+      }
+
+      .oled-screen .info-row {
+        display: flex;
+        justify-content: space-between;
+        font-size: 12px;
+        margin: 4px 0;
+        opacity: 0.8;
+      }
+
+      .oled-screen .notification {
+        font-size: 14px;
+        text-align: center;
+        padding: 8px;
+        background: rgba(0, 255, 170, 0.1);
+        border-radius: 4px;
+        margin-top: 12px;
+        animation: pulse 2s infinite;
+      }
+
+      @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.5; }
+      }
+
+      /* Device status below OLED */
+      .device-status {
+        margin-top: 20px;
+        padding: 16px;
+        background: var(--bg-tertiary);
+        border-radius: 8px;
+      }
+
+      .device-status .row {
+        display: flex;
+        justify-content: space-between;
+        padding: 6px 0;
+        font-size: 12px;
+        border-bottom: 1px solid var(--border);
+      }
+
+      .device-status .row:last-child {
+        border-bottom: none;
+      }
+
+      .device-status .label {
+        color: var(--text-secondary);
+      }
+
+      .device-status .value {
+        font-family: 'JetBrains Mono', monospace;
+        color: var(--text-primary);
+      }
+
+      .device-status .value.active {
+        color: var(--success);
+      }
+
+      .device-status .value.inactive {
+        color: var(--text-muted);
+      }
+
+      /* Right Panel - Trace & Controls */
+      .right-panel {
+        background: var(--bg-secondary);
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+      }
+
+      .panel-tabs {
+        display: flex;
+        border-bottom: 1px solid var(--border);
+      }
+
+      .panel-tab {
+        flex: 1;
+        padding: 12px;
+        text-align: center;
+        font-size: 12px;
+        font-weight: 500;
+        color: var(--text-secondary);
+        cursor: pointer;
+        border: none;
+        background: transparent;
+        transition: all 0.2s;
+      }
+
+      .panel-tab:hover {
+        color: var(--text-primary);
+        background: var(--bg-tertiary);
+      }
+
+      .panel-tab.active {
+        color: var(--accent);
+        background: var(--bg-tertiary);
+        border-bottom: 2px solid var(--accent);
+      }
+
+      .panel-content {
+        flex: 1;
+        overflow: hidden;
+        display: none;
+      }
+
+      .panel-content.active {
+        display: flex;
+        flex-direction: column;
+      }
+
+      /* Trace View */
+      .trace-hint {
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--border);
+        font-size: 11px;
+        color: var(--text-muted);
+        background: var(--bg-tertiary);
+      }
+
+      .trace-view {
+        flex: 1;
+        overflow-y: auto;
+        padding: 12px;
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 11px;
+        line-height: 1.6;
+      }
+
+      .trace-entry {
+        padding: 4px 8px;
+        border-radius: 4px;
+        margin-bottom: 2px;
+        display: flex;
+        gap: 8px;
+        align-items: flex-start;
+      }
+
+      .trace-entry .time {
+        color: var(--text-muted);
+        min-width: 60px;
+      }
+
+      .trace-entry .icon {
+        min-width: 16px;
+      }
+
+      .trace-entry .count {
+        color: var(--text-muted);
+        margin-left: 6px;
+      }
+
+      .trace-entry.motor-start {
+        background: rgba(34, 197, 94, 0.1);
+        color: var(--success);
+      }
+
+      .trace-entry.motor-stop {
+        background: rgba(239, 68, 68, 0.1);
+        color: var(--danger);
+      }
+
+      .trace-entry.pause {
+        background: rgba(245, 158, 11, 0.1);
+        color: var(--warning);
+      }
+
+      .trace-entry.display {
+        background: rgba(99, 102, 241, 0.1);
+        color: var(--accent);
+      }
+
+      .trace-entry.tick {
+        opacity: 0.3;
+      }
+
+      /* Controls Panel */
+      .controls-panel {
+        padding: 16px;
+        overflow-y: auto;
+      }
+
+      .control-section {
+        margin-bottom: 20px;
+      }
+
+      .control-section h3 {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        color: var(--text-secondary);
+        margin-bottom: 12px;
+        padding-bottom: 8px;
+        border-bottom: 1px solid var(--border);
+      }
+
+      .control-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 12px;
+      }
+
+      .control-row label {
+        font-size: 13px;
+        color: var(--text-primary);
+      }
+
+      .control-row input[type="number"],
+      .control-row select {
+        width: 100px;
+        padding: 8px 12px;
+        background: var(--bg-tertiary);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        color: var(--text-primary);
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 13px;
+      }
+
+      .control-row input:focus,
+      .control-row select:focus {
+        outline: none;
+        border-color: var(--accent);
+      }
+
+      /* Buttons */
+      .btn {
+        padding: 10px 16px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--bg-tertiary);
+        color: var(--text-primary);
+        font-size: 12px;
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.2s;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+      }
+
+      .btn:hover {
+        background: var(--bg-card);
+        border-color: var(--accent);
+      }
+
+      .btn.primary {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: white;
+      }
+
+      .btn.primary:hover {
+        background: var(--accent-hover);
+      }
+
+      .btn.success {
+        background: var(--success);
+        border-color: var(--success);
+        color: white;
+      }
+
+      .btn.danger {
+        background: transparent;
+        border-color: var(--danger);
+        color: var(--danger);
+      }
+
+      .btn.danger:hover {
+        background: var(--danger);
+        color: white;
+      }
+
+      .btn.sm {
+        padding: 6px 10px;
+        font-size: 11px;
+      }
+
+      .btn-group {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+
+      /* Toggle switch */
+      .toggle {
+        position: relative;
+        width: 44px;
+        height: 24px;
+      }
+
+      .toggle input {
+        opacity: 0;
+        width: 0;
+        height: 0;
+      }
+
+      .toggle .slider {
+        position: absolute;
+        cursor: pointer;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: var(--bg-tertiary);
+        border: 1px solid var(--border);
+        border-radius: 24px;
+        transition: 0.2s;
+      }
+
+      .toggle .slider:before {
+        position: absolute;
+        content: "";
+        height: 18px;
+        width: 18px;
+        left: 2px;
+        bottom: 2px;
+        background: var(--text-secondary);
+        border-radius: 50%;
+        transition: 0.2s;
+      }
+
+      .toggle input:checked + .slider {
+        background: var(--accent);
+        border-color: var(--accent);
+      }
+
+      .toggle input:checked + .slider:before {
+        transform: translateX(20px);
+        background: white;
+      }
+
+      /* Scrollbar */
+      ::-webkit-scrollbar {
+        width: 6px;
+      }
+
+      ::-webkit-scrollbar-track {
+        background: var(--bg-primary);
+      }
+
+      ::-webkit-scrollbar-thumb {
+        background: var(--border);
+        border-radius: 3px;
+      }
+
+      ::-webkit-scrollbar-thumb:hover {
+        background: var(--text-muted);
+      }
+
+      /* Loading state */
+      .loading {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 100%;
+        color: var(--text-secondary);
+      }
+
+      .loading-spinner {
+        width: 40px;
+        height: 40px;
+        border: 3px solid var(--border);
+        border-top-color: var(--accent);
+        border-radius: 50%;
+        animation: spin 1s linear infinite;
+      }
+
+      @keyframes spin {
+        to { transform: rotate(360deg); }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <header>
+        <div class="logo">
+          <h1>Winderoo Simulator</h1>
+          <span class="badge">WASM + Three.js</span>
+        </div>
+        <div class="time-display">
+          <div class="item">
+            <span class="label">Sim Time</span>
+            <span class="value" id="sim-time">00:00:00</span>
+          </div>
+          <div class="item">
+            <span class="label">Epoch</span>
+            <span class="value" id="sim-epoch">0</span>
+          </div>
+          <div class="item">
+            <span class="label">Speed</span>
+            <span class="value" id="sim-speed">1x</span>
+          </div>
+        </div>
+        <div class="controls">
+          <button class="btn" id="btn-pause">
+            <span>⏸</span> Pause
+          </button>
+          <button class="btn" id="btn-step">
+            <span>⏭</span> Step
+          </button>
+          <button class="btn danger" id="btn-reset">
+            <span>↺</span> Reset
+          </button>
+        </div>
+      </header>
+
+      <div class="view-3d">
+        <canvas id="three-canvas"></canvas>
+        <div class="view-3d-overlay">
+          <button class="btn sm" id="btn-cam-front">Front</button>
+          <button class="btn sm" id="btn-cam-side">Side</button>
+          <button class="btn sm" id="btn-cam-top">Top</button>
+        </div>
+      </div>
+
+      <div class="oled-panel">
+        <h2>OLED Display</h2>
+        <div class="oled-frame">
+          <div class="oled-screen" id="oled-screen">
+            <div class="status" id="oled-status">Stopped</div>
+            <div class="info-row">
+              <span>Direction</span>
+              <span id="oled-direction">BOTH</span>
+            </div>
+            <div class="info-row">
+              <span>TPD</span>
+              <span id="oled-tpd">220</span>
+            </div>
+            <div class="progress-bar">
+              <div class="fill" id="oled-progress" style="width: 0%"></div>
+            </div>
+            <div class="info-row">
+              <span>Progress</span>
+              <span id="oled-progress-text">0%</span>
+            </div>
+            <div class="notification" id="oled-notification" style="display: none;"></div>
+          </div>
+        </div>
+
+        <div class="device-status">
+          <div class="row">
+            <span class="label">Motor</span>
+            <span class="value" id="status-motor">Stopped</span>
+          </div>
+          <div class="row">
+            <span class="label">Rotation</span>
+            <span class="value" id="status-angle">0°</span>
+          </div>
+          <div class="row">
+            <span class="label">Direction</span>
+            <span class="value" id="status-direction">—</span>
+          </div>
+          <div class="row">
+            <span class="label">LED</span>
+            <span class="value" id="status-led">Off</span>
+          </div>
+          <div class="row">
+            <span class="label">Power</span>
+            <span class="value" id="status-power">On</span>
+          </div>
+          <div class="row">
+            <span class="label">Timer</span>
+            <span class="value" id="status-timer">Off</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="right-panel">
+        <div class="panel-tabs">
+          <button class="panel-tab active" data-panel="trace">Algorithm Trace</button>
+          <button class="panel-tab" data-panel="controls">Controls</button>
+        </div>
+
+        <div class="panel-content active" id="panel-trace">
+          <div class="trace-hint" id="trace-hint">
+            Trace: semantic view (DisplayDynamic hidden, duplicates coalesced)
+          </div>
+          <div class="trace-view" id="trace-view">
+            <div class="loading">
+              <div class="loading-spinner"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel-content" id="panel-controls">
+          <div class="controls-panel">
+            <div class="control-section">
+              <h3>Actions</h3>
+              <div class="btn-group">
+                <button class="btn success" id="btn-start">▶ Start</button>
+                <button class="btn" id="btn-stop">■ Stop</button>
+              </div>
+            </div>
+
+            <div class="control-section">
+              <h3>Winding Settings</h3>
+              <div class="control-row">
+                <label>Direction</label>
+                <select id="ctrl-direction">
+                  <option value="BOTH">Both</option>
+                  <option value="CW">Clockwise</option>
+                  <option value="CCW">Counter-CW</option>
+                </select>
+              </div>
+              <div class="control-row">
+                <label>TPD</label>
+                <input type="number" id="ctrl-tpd" value="220" min="0" max="2000">
+              </div>
+              <div class="control-row">
+                <label>Wind Duration (s)</label>
+                <input type="number" id="ctrl-wind-duration" value="180" min="0">
+              </div>
+              <div class="control-row">
+                <label>Pause Duration (s)</label>
+                <input type="number" id="ctrl-wind-pause" value="15" min="0">
+              </div>
+            </div>
+
+            <div class="control-section">
+              <h3>Timer</h3>
+              <div class="control-row">
+                <label>Enabled</label>
+                <label class="toggle">
+                  <input type="checkbox" id="ctrl-timer-enabled">
+                  <span class="slider"></span>
+                </label>
+              </div>
+              <div class="control-row">
+                <label>Start Time</label>
+                <input type="time" id="ctrl-timer-time" value="00:00">
+              </div>
+            </div>
+
+            <div class="control-section">
+              <h3>Power</h3>
+              <div class="control-row">
+                <label>Enabled</label>
+                <label class="toggle">
+                  <input type="checkbox" id="ctrl-power" checked>
+                  <span class="slider"></span>
+                </label>
+              </div>
+            </div>
+
+            <div class="control-section">
+              <h3>Simulation</h3>
+              <div class="control-row">
+                <label>Speed</label>
+                <select id="ctrl-speed">
+                  <option value="0.5">0.5x</option>
+                  <option value="1" selected>1x</option>
+                  <option value="2">2x</option>
+                  <option value="5">5x</option>
+                  <option value="10">10x</option>
+                  <option value="50">50x</option>
+                  <option value="100">100x</option>
+                </select>
+              </div>
+              <div class="control-row">
+                <label>Motor Speed (°/s)</label>
+                <input type="number" id="ctrl-motor-speed" value="45" min="1" max="360">
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

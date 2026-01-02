@@ -1,7 +1,0 @@
----
-alwaysApply: true
----
-
-The purpose of the simulator is to provide a way to test the algorithm without having to deploy it to the actual hardware.
-
-Consult the dioxus manuals/book and codebase located at external/dioxus for examples and best practices.

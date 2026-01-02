@@ -1,0 +1,8 @@
+---
+description: Winderoo Web Simulator - Three.js + WASM
+globs: ["**/*.ts", "**/*.rs", "**/*.html"]
+---
+
+# Winderoo Web Simulator
+
+This is a web-based 3D simulator for the Winderoo watch winder.
