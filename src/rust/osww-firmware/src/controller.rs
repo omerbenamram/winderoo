@@ -6,7 +6,7 @@ use crate::model::{
     UpdateRequest, WinderStatus,
 };
 use crate::time::TimeOfDay;
-use alloc::{string::String, vec::Vec};
+use alloc::{string::{String, ToString}, vec, vec::Vec};
 
 /// Actions emitted by the controller for the hardware integration layer.
 #[derive(Debug, Clone, PartialEq)]

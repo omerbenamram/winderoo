@@ -18,3 +18,5 @@ Thumbs.db
 # ignore .github/* node stuff
 .github/workflows/package.json
 .github/workflows/package-lock.json
+
+external/

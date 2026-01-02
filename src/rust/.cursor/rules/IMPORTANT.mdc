@@ -2,6 +2,17 @@
 alwaysApply: true
 ---
 
-This is a rust port of the original C++ code (src/platformio/osww-server).
+- This is a rust port of the original C++ code (src/platformio/osww-server).
+- When assessing code in the rust port - always consider the original C++ code (src/platformio/osww-server) for context.
+- make sure you are using latest version of the dependencies.
 
-When assessing code in the rust port - always consider the original C++ code (src/platformio/osww-server) for context.
+# External references
+
+## esp32 book
+I have included the rust-esp32 book, which contains best practices for developing rust code for the esp32 - specifically HAL.
+You should refer to it to ensure development is done with best practices.
+
+## embassy codebase/book
+
+I have included the embassy codebase, which contains the embassy library and book.
+Refer to it to gather samples for example usage and best practices.

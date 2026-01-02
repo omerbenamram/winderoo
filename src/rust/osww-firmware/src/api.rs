@@ -1,33 +1,43 @@
 //! API request/response models for the Winderoo firmware.
 
-use alloc::string::String;
+use alloc::{format, string::{String, ToString}};
 use crate::model::{
-    Direction, SettingsSnapshot, StatusSnapshot, UpdateAction, UpdateRequest, WinderStatus,
+    Direction, StatusSnapshot, UpdateAction, UpdateRequest,
 };
-use crate::settings::StoredSettings;
 use crate::time::TimeOfDay;
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 
 /// Errors returned when parsing API payloads into typed requests.
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApiError {
     /// A numeric field could not be parsed.
-    #[error("invalid numeric value for {field}: {value}")]
     InvalidNumber { field: &'static str, value: String },
     /// The direction value was not recognized.
-    #[error("invalid direction: {0}")]
     InvalidDirection(String),
     /// The action value was not recognized.
-    #[error("invalid action: {0}")]
     InvalidAction(String),
     /// The hour/minute values were invalid.
-    #[error("invalid time: {0}")]
     InvalidTime(String),
     /// A boolean flag was malformed.
-    #[error("invalid boolean flag: {0}")]
     InvalidFlag(String),
 }
+
+impl core::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            ApiError::InvalidNumber { field, value } => {
+                write!(f, "invalid numeric value for {}: {}", field, value)
+            }
+            ApiError::InvalidDirection(value) => write!(f, "invalid direction: {}", value),
+            ApiError::InvalidAction(value) => write!(f, "invalid action: {}", value),
+            ApiError::InvalidTime(value) => write!(f, "invalid time: {}", value),
+            ApiError::InvalidFlag(value) => write!(f, "invalid boolean flag: {}", value),
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for ApiError {}
 
 fn de_string_from_any<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
@@ -74,8 +84,9 @@ where
         where
             E: serde::de::Error,
         {
-            if value.fract() == 0.0 {
-                Ok((value as i64).to_string())
+            let int_value = value as i64;
+            if (int_value as f64) == value {
+                Ok(int_value.to_string())
             } else {
                 Ok(value.to_string())
             }
@@ -386,16 +397,6 @@ impl ResetResponse {
             status: "Resetting".to_string(),
         }
     }
-}
-
-/// Helper to transform runtime state into stored settings.
-pub fn settings_from_snapshot(snapshot: &SettingsSnapshot) -> StoredSettings {
-    StoredSettings::from_snapshot(snapshot)
-}
-
-/// Helper to create a stored status payload.
-pub fn status_string(status: &WinderStatus) -> String {
-    status.as_str().to_string()
 }
 
 #[cfg(test)]

@@ -9,11 +9,9 @@
 
 extern crate alloc;
 
-#[cfg(feature = "std")]
 pub mod api;
 pub mod controller;
 pub mod hardware;
 pub mod model;
-#[cfg(feature = "std")]
 pub mod settings;
 pub mod time;

@@ -1,7 +1,7 @@
 //! Core domain types for Winderoo runtime state.
 
 use crate::time::TimeOfDay;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use core::fmt;
 
 /// The user-visible winding direction modes.
@@ -232,6 +232,8 @@ pub struct SettingsSnapshot {
     pub status: WinderStatus,
     /// Rotations per day.
     pub rotations_per_day: u16,
+    /// Whether the winder is enabled (hard off toggle).
+    pub winder_enabled: bool,
     /// Timer enabled flag.
     pub timer_enabled: bool,
     /// Timer hour.
@@ -266,6 +268,7 @@ impl SettingsSnapshot {
         Self {
             status: state.status.clone(),
             rotations_per_day: state.rotations_per_day,
+            winder_enabled: state.winder_enabled,
             timer_enabled: state.timer.enabled,
             timer_hour: state.timer.start_time.hour,
             timer_minutes: state.timer.start_time.minute,

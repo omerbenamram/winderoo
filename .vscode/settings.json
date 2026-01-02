@@ -60,6 +60,7 @@
         "cinttypes": "cpp"
     },
     "rust-analyzer.linkedProjects": [
-        "src/rust/osww-firmware/Cargo.toml"
+        "src/rust/osww-firmware/Cargo.toml",
+        "src/rust/osww-embassy/Cargo.toml"
     ]
 }

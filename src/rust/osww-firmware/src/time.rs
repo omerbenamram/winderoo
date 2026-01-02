@@ -1,22 +1,31 @@
 //! Time-related helpers for the firmware domain model.
 
-use alloc::string::String;
+use alloc::{format, string::{String, ToString}};
 use core::fmt;
-use thiserror::Error;
 
 /// Errors returned when parsing or constructing a [`TimeOfDay`].
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TimeError {
     /// Hour was outside the 0-23 range.
-    #[error("hour out of range: {0}")]
     InvalidHour(u8),
     /// Minute was outside the 0-59 range.
-    #[error("minute out of range: {0}")]
     InvalidMinute(u8),
     /// The input string was not in the expected `HH:MM` format.
-    #[error("invalid time format: {0}")]
     InvalidFormat(String),
 }
+
+impl fmt::Display for TimeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TimeError::InvalidHour(hour) => write!(f, "hour out of range: {}", hour),
+            TimeError::InvalidMinute(minute) => write!(f, "minute out of range: {}", minute),
+            TimeError::InvalidFormat(value) => write!(f, "invalid time format: {}", value),
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for TimeError {}
 
 /// A 24-hour clock time without a date or timezone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,6 +76,38 @@ impl TimeOfDay {
     }
 }
 
+/// Convert an epoch timestamp (seconds) into a [`TimeOfDay`], wrapping every 24 hours.
+pub fn time_of_day_from_epoch(epoch: u64) -> TimeOfDay {
+    let seconds = (epoch % 86_400) as u32;
+    let hour = (seconds / 3_600) as u8;
+    let minute = ((seconds / 60) % 60) as u8;
+    TimeOfDay::new(hour, minute).unwrap_or(TimeOfDay { hour: 0, minute: 0 })
+}
+
+/// Convert a UTC epoch timestamp into a local epoch timestamp using a GMT offset and DST flag.
+///
+/// Negative results clamp to `0`.
+pub fn local_epoch_from_utc(utc_epoch: u64, gmt_offset_hours: f32, dst: bool) -> u64 {
+    let mut offset_hours = gmt_offset_hours;
+    if dst {
+        offset_hours += 1.0;
+    }
+    // `f32::round` is not available in all `no_std` targets, so implement a tiny
+    // "round half away from zero" helper using truncating casts.
+    let offset_secs_f = offset_hours * 3600.0;
+    let offset_secs = if offset_secs_f >= 0.0 {
+        (offset_secs_f + 0.5) as i64
+    } else {
+        (offset_secs_f - 0.5) as i64
+    };
+    let local_epoch = utc_epoch as i64 + offset_secs;
+    if local_epoch < 0 {
+        0
+    } else {
+        local_epoch as u64
+    }
+}
+
 impl fmt::Display for TimeOfDay {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.to_hh_mm())
@@ -97,5 +138,19 @@ mod tests {
     fn total_minutes() {
         let time = TimeOfDay::new(2, 30).unwrap();
         assert_eq!(time.total_minutes(), 150);
+    }
+
+    #[test]
+    fn time_of_day_from_epoch_wraps_daily() {
+        let time = time_of_day_from_epoch(86_400 + 3_660);
+        assert_eq!(time.hour, 1);
+        assert_eq!(time.minute, 1);
+    }
+
+    #[test]
+    fn local_epoch_from_utc_applies_offset() {
+        assert_eq!(local_epoch_from_utc(100, 1.0, false), 3_700);
+        assert_eq!(local_epoch_from_utc(100, 1.0, true), 7_300);
+        assert_eq!(local_epoch_from_utc(100, -1.0, false), 0);
     }
 }

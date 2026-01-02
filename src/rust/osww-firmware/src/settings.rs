@@ -5,9 +5,8 @@ use crate::model::{
     TimerConfig, WinderStatus,
 };
 use crate::time::{TimeError, TimeOfDay};
-use alloc::string::String;
+use alloc::{format, string::{String, ToString}};
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 
 /// Settings as stored on the device filesystem.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -19,6 +18,9 @@ pub struct StoredSettings {
     /// Saved rotations per day.
     #[serde(rename = "savedTPD")]
     pub rotations_per_day: String,
+    /// Saved winder enabled state ("0" or "1").
+    #[serde(rename = "winderEnabled")]
+    pub winder_enabled: String,
     /// Saved timer hour.
     #[serde(rename = "savedHour")]
     pub hour: String,
@@ -65,6 +67,7 @@ impl Default for StoredSettings {
         Self {
             status: "Stopped".to_string(),
             rotations_per_day: "220".to_string(),
+            winder_enabled: "1".to_string(),
             hour: "00".to_string(),
             minutes: "00".to_string(),
             timer_enabled: "0".to_string(),
@@ -83,24 +86,36 @@ impl Default for StoredSettings {
 }
 
 /// Errors that can occur when parsing stored settings into runtime state.
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SettingsError {
     /// A numeric field could not be parsed.
-    #[error("invalid numeric value for {field}: {value}")]
     InvalidNumber { field: &'static str, value: String },
     /// The direction value was not recognized.
-    #[error("invalid direction: {0}")]
     InvalidDirection(String),
     /// A boolean flag was malformed.
-    #[error("invalid boolean flag: {0}")]
     InvalidFlag(String),
     /// A time value was invalid.
-    #[error("invalid time: {0}")]
     InvalidTime(String),
     /// A time parsing error was raised.
-    #[error(transparent)]
-    Time(#[from] TimeError),
+    Time(TimeError),
 }
+
+impl core::fmt::Display for SettingsError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            SettingsError::InvalidNumber { field, value } => {
+                write!(f, "invalid numeric value for {}: {}", field, value)
+            }
+            SettingsError::InvalidDirection(value) => write!(f, "invalid direction: {}", value),
+            SettingsError::InvalidFlag(value) => write!(f, "invalid boolean flag: {}", value),
+            SettingsError::InvalidTime(value) => write!(f, "invalid time: {}", value),
+            SettingsError::Time(source) => write!(f, "{}", source),
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for SettingsError {}
 
 fn parse_u16(field: &'static str, value: &str) -> Result<u16, SettingsError> {
     value
@@ -135,6 +150,7 @@ impl StoredSettings {
         let rotations_per_day = parse_u16("rotations_per_day", &self.rotations_per_day)?;
         let direction = Direction::from_api(&self.direction)
             .ok_or_else(|| SettingsError::InvalidDirection(self.direction.clone()))?;
+        let winder_enabled = parse_bool_flag(&self.winder_enabled)?;
         let motor_direction = match direction {
             Direction::Clockwise => MotorDirection::Clockwise,
             Direction::CounterClockwise => MotorDirection::CounterClockwise,
@@ -145,7 +161,7 @@ impl StoredSettings {
         let minute = parse_u8("minutes", &self.minutes)?;
         let timer = TimerConfig {
             enabled: timer_enabled,
-            start_time: TimeOfDay::new(hour, minute)?,
+            start_time: TimeOfDay::new(hour, minute).map_err(SettingsError::Time)?,
         };
         let custom_wind_duration_secs = parse_u32("custom_wind_duration", &self.custom_wind_duration)?;
         let custom_wind_pause_secs = parse_u32("custom_wind_pause_duration", &self.custom_wind_pause_duration)?;
@@ -156,8 +172,9 @@ impl StoredSettings {
         };
         let schedule = ScreenSchedule {
             enabled: self.screen_schedule_enabled,
-            start: TimeOfDay::parse_hh_mm(&self.screen_schedule_start_time)?,
-            end: TimeOfDay::parse_hh_mm(&self.screen_schedule_end_time)?,
+            start: TimeOfDay::parse_hh_mm(&self.screen_schedule_start_time)
+                .map_err(SettingsError::Time)?,
+            end: TimeOfDay::parse_hh_mm(&self.screen_schedule_end_time).map_err(SettingsError::Time)?,
         };
         let screen = ScreenState {
             equipped: screen_equipped,
@@ -171,7 +188,7 @@ impl StoredSettings {
             direction,
             motor_direction,
             timer,
-            winder_enabled: true,
+            winder_enabled,
             custom_wind_duration_secs,
             custom_wind_pause_secs,
             rotation_duration_secs,
@@ -187,6 +204,7 @@ impl StoredSettings {
         Self {
             status: snapshot.status.as_str().to_string(),
             rotations_per_day: snapshot.rotations_per_day.to_string(),
+            winder_enabled: if snapshot.winder_enabled { "1".to_string() } else { "0".to_string() },
             hour: format!("{:02}", snapshot.timer_hour),
             minutes: format!("{:02}", snapshot.timer_minutes),
             timer_enabled: if snapshot.timer_enabled { "1".to_string() } else { "0".to_string() },
