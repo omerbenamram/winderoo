@@ -12,6 +12,7 @@ pub mod model;
 pub mod oled_ui;
 pub mod settings;
 pub mod time;
+pub mod wifi_portal;
 
 #[cfg(feature = "esp32")]
 pub mod esp32;

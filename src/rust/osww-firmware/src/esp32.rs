@@ -4,17 +4,20 @@
 mod ha_mqtt;
 #[cfg(feature = "oled")]
 mod oled;
+mod wifi;
 
-use crate::api::{PowerPayload, ResetResponse, StatusResponse, UpdatePayload, UpdateRequest};
+use crate::api::{PowerPayload, ResetResponse, UpdatePayload, UpdateRequest};
 use crate::controller::{Controller, ControllerEvent};
 use crate::hardware::{LedPattern, XorShift32};
-use crate::model::{Direction, MotorDirection, RuntimeState, WinderStatus};
+use crate::model::{MotorDirection, RuntimeState};
 use crate::settings::{SettingsError, StoredSettings};
-use crate::time::{time_of_day_from_epoch, TimeOfDay};
+use crate::time::time_of_day_from_epoch;
 use embedded_svc::http::headers::content_type;
 use embedded_svc::http::Method;
-use embedded_svc::io::{Read as SvcRead, Write as SvcWrite};
-use esp_idf_hal::gpio::{Input, Output, PinDriver, Pull};
+use embedded_svc::io::Write as SvcWrite;
+use esp_idf_hal::gpio::{Input, PinDriver, Pull};
+#[cfg(not(feature = "pwm-motor"))]
+use esp_idf_hal::gpio::Output;
 use esp_idf_hal::i2c::{I2cConfig, I2cDriver};
 use esp_idf_hal::ledc::{config::TimerConfig, LedcDriver, LedcTimerDriver};
 use esp_idf_hal::peripherals::Peripherals;
@@ -25,15 +28,11 @@ use esp_idf_svc::http::server::{Configuration as HttpConfig, EspHttpServer};
 use esp_idf_svc::io::vfs::MountedLittlefs;
 use esp_idf_svc::log::EspLogger;
 use esp_idf_svc::mdns::EspMdns;
-use esp_idf_svc::nvs::{EspDefaultNvsPartition, EspNvs};
+use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use esp_idf_svc::sntp::{EspSntp, SyncStatus};
-use esp_idf_svc::wifi::{
-    AccessPointConfiguration, AuthMethod, BlockingWifi, ClientConfiguration, Configuration, EspWifi,
-};
-use heapless::String as HeaplessString;
-use log::{info, warn};
+use esp_idf_svc::wifi::{BlockingWifi, EspWifi};
+use log::warn;
 use std::fs;
-use std::io::{Read as StdRead, Write as StdWrite};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -45,6 +44,8 @@ use ha_mqtt::HomeAssistant;
 
 #[cfg(feature = "oled")]
 use oled::OledDisplay;
+
+use wifi::{connect_wifi, start_config_portal, WifiCredentials};
 
 const API_VERSION: &str = "4.0.1";
 const HOSTNAME: &str = "winderoo";
@@ -102,7 +103,7 @@ pub fn run() -> Result<(), Esp32Error> {
         ..
     } = peripherals;
 
-    let mut hardware = Hardware::new(pins, ledc, i2c0)?;
+    let hardware = Hardware::new(pins, ledc, i2c0)?;
 
     let _mounted_fs = mount_littlefs()?;
     let storage = Storage::new(FS_ROOT, SETTINGS_FILE);
@@ -166,103 +167,6 @@ fn mount_littlefs() -> Result<MountedLittlefs<Littlefs<std::ffi::CString>>, Esp3
     let littlefs = unsafe { Littlefs::new_partition("littlefs")? };
     let mounted = MountedLittlefs::mount(littlefs, FS_ROOT)?;
     Ok(mounted)
-}
-
-fn connect_wifi(
-    wifi: &mut BlockingWifi<EspWifi>,
-    creds: &WifiCredentials,
-) -> Result<(), Esp32Error> {
-    let mut client_cfg = ClientConfiguration::default();
-    client_cfg.ssid = to_heapless(&creds.ssid)?;
-    client_cfg.password = to_heapless(&creds.password)?;
-    client_cfg.auth_method = if creds.password.is_empty() {
-        AuthMethod::None
-    } else {
-        AuthMethod::WPA2Personal
-    };
-
-    wifi.set_configuration(&Configuration::Client(client_cfg))?;
-    wifi.start()?;
-    wifi.connect()?;
-    wifi.wait_netif_up()?;
-
-    info!("connected to wifi");
-    Ok(())
-}
-
-fn start_config_portal(
-    wifi: &mut BlockingWifi<EspWifi>,
-    storage: &Arc<Storage>,
-    hardware: &Arc<Mutex<Hardware>>,
-    shared: &Arc<Mutex<SharedState>>,
-    nvs: &EspDefaultNvsPartition,
-) -> Result<(), Esp32Error> {
-    info!("starting wifi config portal");
-
-    let mut ap_cfg = AccessPointConfiguration::default();
-    ap_cfg.ssid = to_heapless(AP_SSID)?;
-    ap_cfg.auth_method = AuthMethod::None;
-    ap_cfg.password = HeaplessString::new();
-
-    wifi.set_configuration(&Configuration::AccessPoint(ap_cfg))?;
-    wifi.start()?;
-
-    let portal_state = Arc::new(Mutex::new(false));
-    let portal_state_handler = portal_state.clone();
-    let nvs_handler = nvs.clone();
-
-    let mut server = EspHttpServer::new(&HttpConfig {
-        uri_match_wildcard: true,
-        ..Default::default()
-    })?;
-
-    server.fn_handler("/", Method::Get, move |req| -> Result<(), Esp32Error> {
-        let page = config_portal_page();
-        let headers = [content_type("text/html"), cors_allow_origin()];
-        let mut response = req.into_response(200, Some("OK"), &headers)?;
-        response.write_all(page.as_bytes())?;
-        Ok(())
-    })?;
-
-    server.fn_handler("/*", Method::Get, move |req| -> Result<(), Esp32Error> {
-        let page = config_portal_page();
-        let headers = [content_type("text/html"), cors_allow_origin()];
-        let mut response = req.into_response(200, Some("OK"), &headers)?;
-        response.write_all(page.as_bytes())?;
-        Ok(())
-    })?;
-
-    server.fn_handler(
-        "/wifi",
-        Method::Post,
-        move |mut req| -> Result<(), Esp32Error> {
-            let body = read_request_body(&mut req)?;
-
-            if let Some((ssid, password)) = parse_wifi_payload(&body) {
-                let creds = WifiCredentials { ssid, password };
-                WifiCredentials::save(&nvs_handler, &creds).map_err(Esp32Error::from)?;
-                let headers = [content_type("text/plain"), cors_allow_origin()];
-                let mut response = req.into_response(200, Some("OK"), &headers)?;
-                response.write_all(b"Saved. Restarting...")?;
-
-                let mut flag = portal_state_handler.lock().map_err(|_| Esp32Error::Lock)?;
-                *flag = true;
-                return Ok(());
-            }
-
-            let headers = [content_type("text/plain"), cors_allow_origin()];
-            let mut response = req.into_response(400, Some("Bad Request"), &headers)?;
-            response.write_all(b"Invalid payload")?;
-            Ok(())
-        },
-    )?;
-
-    loop {
-        if *portal_state.lock().map_err(|_| Esp32Error::Lock)? {
-            notify_and_restart(shared, hardware, storage, nvs)?;
-        }
-        thread::sleep(Duration::from_millis(200));
-    }
 }
 
 fn resume_if_needed(
@@ -342,7 +246,7 @@ fn run_loop(
 }
 
 fn read_button(hardware: &Arc<Mutex<Hardware>>) -> Result<bool, Esp32Error> {
-    let mut guard = hardware.lock().map_err(|_| Esp32Error::Lock)?;
+    let guard = hardware.lock().map_err(|_| Esp32Error::Lock)?;
     Ok(guard.button.is_high())
 }
 
@@ -399,7 +303,7 @@ fn apply_events(
 }
 
 fn notify_and_restart(
-    shared: &Arc<Mutex<SharedState>>,
+    _shared: &Arc<Mutex<SharedState>>,
     hardware: &Arc<Mutex<Hardware>>,
     storage: &Arc<Storage>,
     nvs: &EspDefaultNvsPartition,
@@ -414,6 +318,7 @@ fn notify_and_restart(
     storage.flush()?;
 
     unsafe { esp_idf_sys::esp_restart() };
+    #[allow(unreachable_code)]
     Ok(())
 }
 
@@ -692,102 +597,6 @@ fn parse_query_bool(uri: &str, key: &str) -> Option<bool> {
     None
 }
 
-fn parse_wifi_payload(body: &str) -> Option<(String, String)> {
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(body) {
-        let ssid = json.get("ssid")?.as_str()?.to_string();
-        let password = json
-            .get("password")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        return Some((ssid, password));
-    }
-
-    let mut ssid = None;
-    let mut password = None;
-    for part in body.split('&') {
-        let mut iter = part.split('=');
-        if let (Some(k), Some(v)) = (iter.next(), iter.next()) {
-            if k == "ssid" {
-                ssid = Some(v.to_string());
-            } else if k == "password" {
-                password = Some(v.to_string());
-            }
-        }
-    }
-
-    ssid.map(|s| (s, password.unwrap_or_default()))
-}
-
-fn config_portal_page() -> &'static str {
-    r#"<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Winderoo WiFi Setup</title>
-  <style>
-    body { font-family: Arial, sans-serif; padding: 24px; }
-    label { display: block; margin-top: 12px; }
-    input { width: 100%; padding: 8px; font-size: 16px; }
-    button { margin-top: 16px; padding: 10px 16px; font-size: 16px; }
-  </style>
-</head>
-<body>
-  <h2>Winderoo WiFi Setup</h2>
-  <p>Enter your WiFi credentials to connect this device.</p>
-  <form method="post" action="/wifi">
-    <label>SSID</label>
-    <input name="ssid" required />
-    <label>Password</label>
-    <input name="password" type="password" />
-    <button type="submit">Save & Restart</button>
-  </form>
-</body>
-</html>"#
-}
-
-fn to_heapless<const N: usize>(value: &str) -> Result<HeaplessString<N>, Esp32Error> {
-    HeaplessString::try_from(value).map_err(|_| Esp32Error::InvalidConfig(value.to_string()))
-}
-
-#[derive(Debug, Clone)]
-struct WifiCredentials {
-    ssid: String,
-    password: String,
-}
-
-impl WifiCredentials {
-    fn load(nvs: &EspDefaultNvsPartition) -> Result<Option<Self>, Esp32Error> {
-        let nvs = EspNvs::new(nvs.clone(), "wifi", true)?;
-        let mut ssid_buf = [0u8; 33];
-        let mut pass_buf = [0u8; 65];
-        let ssid = nvs.get_str("ssid", &mut ssid_buf)?;
-        let password = nvs.get_str("password", &mut pass_buf)?;
-        match ssid {
-            Some(ssid) => Ok(Some(Self {
-                ssid: ssid.to_string(),
-                password: password.unwrap_or("").to_string(),
-            })),
-            None => Ok(None),
-        }
-    }
-
-    fn save(nvs: &EspDefaultNvsPartition, creds: &WifiCredentials) -> Result<(), Esp32Error> {
-        let mut nvs = EspNvs::new(nvs.clone(), "wifi", true)?;
-        nvs.set_str("ssid", &creds.ssid)?;
-        nvs.set_str("password", &creds.password)?;
-        Ok(())
-    }
-
-    fn clear(nvs: &EspDefaultNvsPartition) -> Result<(), Esp32Error> {
-        let mut nvs = EspNvs::new(nvs.clone(), "wifi", true)?;
-        let _ = nvs.remove("ssid");
-        let _ = nvs.remove("password");
-        Ok(())
-    }
-}
-
 struct Storage {
     root: PathBuf,
     settings_path: PathBuf,
@@ -912,7 +721,7 @@ impl Hardware {
         ledc: esp_idf_hal::ledc::LEDC,
         i2c0: esp_idf_hal::i2c::I2C0,
     ) -> Result<Self, Esp32Error> {
-        let mut pins = pins;
+        let pins = pins;
         let ledc = ledc;
         let _i2c0 = i2c0;
 
