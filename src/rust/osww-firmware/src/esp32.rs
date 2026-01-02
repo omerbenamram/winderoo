@@ -4,20 +4,21 @@
 mod ha_mqtt;
 #[cfg(feature = "oled")]
 mod oled;
+mod storage;
 mod wifi;
 
 use crate::api::{PowerPayload, ResetResponse, UpdatePayload, UpdateRequest};
 use crate::controller::{Controller, ControllerEvent};
 use crate::hardware::{LedPattern, XorShift32};
 use crate::model::{MotorDirection, RuntimeState};
-use crate::settings::{SettingsError, StoredSettings};
+use crate::settings::SettingsError;
 use crate::time::time_of_day_from_epoch;
 use embedded_svc::http::headers::content_type;
 use embedded_svc::http::Method;
 use embedded_svc::io::Write as SvcWrite;
-use esp_idf_hal::gpio::{Input, PinDriver, Pull};
 #[cfg(not(feature = "pwm-motor"))]
 use esp_idf_hal::gpio::Output;
+use esp_idf_hal::gpio::{Input, PinDriver, Pull};
 use esp_idf_hal::i2c::{I2cConfig, I2cDriver};
 use esp_idf_hal::ledc::{config::TimerConfig, LedcDriver, LedcTimerDriver};
 use esp_idf_hal::peripherals::Peripherals;
@@ -32,8 +33,6 @@ use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use esp_idf_svc::sntp::{EspSntp, SyncStatus};
 use esp_idf_svc::wifi::{BlockingWifi, EspWifi};
 use log::warn;
-use std::fs;
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -44,6 +43,8 @@ use ha_mqtt::HomeAssistant;
 
 #[cfg(feature = "oled")]
 use oled::OledDisplay;
+
+use storage::Storage;
 
 use wifi::{connect_wifi, start_config_portal, WifiCredentials};
 
@@ -595,110 +596,6 @@ fn parse_query_bool(uri: &str, key: &str) -> Option<bool> {
         }
     }
     None
-}
-
-struct Storage {
-    root: PathBuf,
-    settings_path: PathBuf,
-}
-
-impl Storage {
-    fn new(root: &str, settings_file: &str) -> Self {
-        let root = PathBuf::from(root);
-        let settings_path = root.join(settings_file);
-        Self {
-            root,
-            settings_path,
-        }
-    }
-
-    fn load_or_init(&self) -> Result<StoredSettings, Esp32Error> {
-        if let Ok(contents) = fs::read_to_string(&self.settings_path) {
-            if let Ok(settings) = serde_json::from_str::<StoredSettings>(&contents) {
-                return Ok(settings);
-            }
-        }
-        let settings = StoredSettings::default();
-        self.save(&settings)?;
-        Ok(settings)
-    }
-
-    fn save(&self, settings: &StoredSettings) -> Result<(), Esp32Error> {
-        let json = serde_json::to_string_pretty(settings)?;
-        fs::write(&self.settings_path, json)?;
-        Ok(())
-    }
-
-    fn flush(&self) -> Result<(), Esp32Error> {
-        Ok(())
-    }
-
-    fn resolve_asset(&self, uri: &str) -> Option<StaticAsset> {
-        let mut path = uri.split('?').next().unwrap_or("").trim_start_matches('/');
-        if path.is_empty() {
-            path = "index.html";
-        }
-        if path.contains("..") {
-            return None;
-        }
-
-        let candidate = self.root.join(path);
-        if let Some(asset) = StaticAsset::from_path(&candidate, false) {
-            return Some(asset);
-        }
-
-        let gz_candidate = PathBuf::from(format!("{}.gz", candidate.display()));
-        if let Some(asset) = StaticAsset::from_path(&gz_candidate, true) {
-            return Some(asset);
-        }
-
-        None
-    }
-}
-
-struct StaticAsset {
-    bytes: Vec<u8>,
-    content_type: &'static str,
-    cache_control: &'static str,
-    content_encoding: &'static str,
-}
-
-impl StaticAsset {
-    fn from_path(path: &Path, gzipped: bool) -> Option<Self> {
-        let bytes = fs::read(path).ok()?;
-        let ext = if gzipped {
-            path.file_stem()
-                .and_then(|s| Path::new(s).extension())
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-        } else {
-            path.extension().and_then(|s| s.to_str()).unwrap_or("")
-        };
-        let content_type = match ext {
-            "html" | "htm" => "text/html",
-            "css" => "text/css",
-            "js" => "application/javascript",
-            "json" => "application/json",
-            "ico" => "image/x-icon",
-            "svg" => "image/svg+xml",
-            "png" => "image/png",
-            "jpg" | "jpeg" => "image/jpeg",
-            "gz" => "application/octet-stream",
-            _ => "application/octet-stream",
-        };
-        let cache_control = if ext == "js" || ext == "css" {
-            "max-age=31536000"
-        } else {
-            "no-cache"
-        };
-        let content_encoding = if gzipped { "gzip" } else { "" };
-        Some(Self {
-            bytes,
-            content_type,
-            cache_control,
-            content_encoding,
-        })
-    }
 }
 
 struct SharedState {
