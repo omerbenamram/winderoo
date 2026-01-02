@@ -1,15 +1,16 @@
 //! ESP32 runtime integration using ESP-IDF services.
 
+mod events;
 #[cfg(feature = "home-assistant")]
 mod ha_mqtt;
-mod http;
 mod hardware;
+mod http;
 #[cfg(feature = "oled")]
 mod oled;
 mod storage;
 mod wifi;
 
-use crate::controller::{Controller, ControllerEvent};
+use crate::controller::Controller;
 use crate::hardware::{LedPattern, XorShift32};
 use crate::settings::SettingsError;
 use crate::time::time_of_day_from_epoch;
@@ -164,7 +165,7 @@ fn resume_if_needed(
         let mut guard = shared.lock().map_err(|_| Esp32Error::Lock)?;
         guard.controller.resume_if_needed(now)
     };
-    apply_events(shared, hardware, storage, events)
+    events::apply_events(shared, hardware, storage, events)
 }
 
 fn run_loop(
@@ -197,7 +198,7 @@ fn run_loop(
                 let events = guard.controller.tick(epoch, time);
                 events
             };
-            apply_events(&shared, &hardware, &storage, events)?;
+            events::apply_events(&shared, &hardware, &storage, events)?;
             last_tick = Instant::now();
         }
 
@@ -211,7 +212,7 @@ fn run_loop(
                     let mut guard = shared.lock().map_err(|_| Esp32Error::Lock)?;
                     guard.controller.apply_power(false)
                 };
-                apply_events(&shared, &hardware, &storage, events)?;
+                events::apply_events(&shared, &hardware, &storage, events)?;
             }
         }
 
@@ -238,53 +239,6 @@ fn read_button(hardware: &Arc<Mutex<Hardware>>) -> Result<bool, Esp32Error> {
 fn check_reset_requested(shared: &Arc<Mutex<SharedState>>) -> Result<bool, Esp32Error> {
     let guard = shared.lock().map_err(|_| Esp32Error::Lock)?;
     Ok(guard.reset_requested)
-}
-
-fn apply_events(
-    shared: &Arc<Mutex<SharedState>>,
-    hardware: &Arc<Mutex<Hardware>>,
-    storage: &Arc<Storage>,
-    events: Vec<ControllerEvent>,
-) -> Result<(), Esp32Error> {
-    if events.is_empty() {
-        return Ok(());
-    }
-
-    let mut hw = hardware.lock().map_err(|_| Esp32Error::Lock)?;
-
-    for event in events {
-        match event {
-            ControllerEvent::MotorStart(dir) => hw.motor_start(dir)?,
-            ControllerEvent::MotorStop => hw.motor_stop()?,
-            ControllerEvent::PauseSeconds(secs) => {
-                thread::sleep(Duration::from_secs(secs as u64));
-            }
-            ControllerEvent::DisplayClear => hw.display_clear()?,
-            ControllerEvent::DisplayStatic { title } => {
-                hw.display_static(&title)?;
-            }
-            ControllerEvent::DisplayDynamic => {
-                let guard = shared.lock().map_err(|_| Esp32Error::Lock)?;
-                hw.display_dynamic(&guard.controller.state, guard.rssi)?;
-            }
-            ControllerEvent::DisplayNotification(message) => {
-                hw.display_notification(&message)?;
-            }
-            ControllerEvent::Led(pattern) => hw.led_trigger(pattern)?,
-            ControllerEvent::PersistSettings(settings) => storage.save(&settings)?,
-            ControllerEvent::SyncTime => {
-                if let Err(err) = sync_time() {
-                    warn!("time sync failed: {err}");
-                }
-            }
-            ControllerEvent::RestartDevice => {
-                let mut guard = shared.lock().map_err(|_| Esp32Error::Lock)?;
-                guard.reset_requested = true;
-            }
-        }
-    }
-
-    Ok(())
 }
 
 fn notify_and_restart(

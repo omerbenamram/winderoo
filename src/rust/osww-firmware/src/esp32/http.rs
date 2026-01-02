@@ -13,7 +13,8 @@ use embedded_svc::io::Write as SvcWrite;
 use esp_idf_svc::http::server::{Configuration as HttpConfig, EspHttpServer};
 use std::sync::{Arc, Mutex};
 
-use super::{apply_events, current_epoch, Esp32Error, Hardware, SharedState, Storage, API_VERSION};
+use super::events::apply_events;
+use super::{current_epoch, Esp32Error, Hardware, SharedState, Storage, API_VERSION};
 
 pub(super) fn start_http_server(
     shared: Arc<Mutex<SharedState>>,
@@ -138,7 +139,11 @@ pub(super) fn start_http_server(
     Ok(server)
 }
 
-fn respond_json<C>(req: embedded_svc::http::server::Request<C>, status: u16, body: &str) -> Result<(), Esp32Error>
+fn respond_json<C>(
+    req: embedded_svc::http::server::Request<C>,
+    status: u16,
+    body: &str,
+) -> Result<(), Esp32Error>
 where
     C: embedded_svc::http::server::Connection,
     Esp32Error: From<<C as embedded_svc::io::ErrorType>::Error>,
@@ -154,7 +159,10 @@ where
     Ok(())
 }
 
-fn respond_empty<C>(req: embedded_svc::http::server::Request<C>, status: u16) -> Result<(), Esp32Error>
+fn respond_empty<C>(
+    req: embedded_svc::http::server::Request<C>,
+    status: u16,
+) -> Result<(), Esp32Error>
 where
     C: embedded_svc::http::server::Connection,
     Esp32Error: From<<C as embedded_svc::io::ErrorType>::Error>,
@@ -169,7 +177,10 @@ where
     Ok(())
 }
 
-fn serve_static<C>(req: embedded_svc::http::server::Request<C>, storage: &Storage) -> Result<(), Esp32Error>
+fn serve_static<C>(
+    req: embedded_svc::http::server::Request<C>,
+    storage: &Storage,
+) -> Result<(), Esp32Error>
 where
     C: embedded_svc::http::server::Connection,
     Esp32Error: From<<C as embedded_svc::io::ErrorType>::Error>,
@@ -219,7 +230,9 @@ fn cache_control(value: &'static str) -> (&'static str, &'static str) {
     ("Cache-Control", value)
 }
 
-pub(super) fn read_request_body<C>(req: &mut embedded_svc::http::server::Request<C>) -> Result<String, Esp32Error>
+pub(super) fn read_request_body<C>(
+    req: &mut embedded_svc::http::server::Request<C>,
+) -> Result<String, Esp32Error>
 where
     C: embedded_svc::http::server::Connection,
     Esp32Error: From<<C as embedded_svc::io::ErrorType>::Error>,
@@ -254,4 +267,3 @@ fn parse_query_bool(uri: &str, key: &str) -> Option<bool> {
     }
     None
 }
-

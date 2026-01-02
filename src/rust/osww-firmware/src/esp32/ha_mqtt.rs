@@ -17,7 +17,8 @@ use esp_idf_svc::mqtt::client::{EspMqttClient, EventPayload, MqttClientConfigura
 use log::warn;
 use std::sync::{mpsc, Arc, Mutex};
 
-use super::{apply_events, current_epoch, Esp32Error, Hardware, SharedState, Storage};
+use super::events::apply_events;
+use super::{current_epoch, Esp32Error, Hardware, SharedState, Storage};
 
 const HA_BROKER_ENV: Option<&str> = option_env!("HOME_ASSISTANT_BROKER");
 const HA_USERNAME_ENV: Option<&str> = option_env!("HOME_ASSISTANT_USERNAME");
