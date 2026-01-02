@@ -223,7 +223,7 @@ impl WasmSimulator {
             motor_angle: self.motor_angle,
             led_pattern: self.led_pattern.map(|p| format!("{:?}", p)),
             display_on: self.display_on && !self.controller.state.screen.sleep,
-            display_title: None, // Now rendered via display buffer
+            display_title: None,        // Now rendered via display buffer
             display_notification: None, // Now rendered via display buffer
             winder_enabled: self.controller.state.winder_enabled,
             status: self.controller.state.status.as_str().into(),

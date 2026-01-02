@@ -6,3 +6,5 @@ globs: ["**/*.ts", "**/*.rs", "**/*.html"]
 # Winderoo Web Simulator
 
 This is a web-based 3D simulator for the Winderoo watch winder.
+
+use bun
