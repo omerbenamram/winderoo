@@ -7,7 +7,9 @@
 pub mod api;
 pub mod controller;
 pub mod hardware;
+pub mod home_assistant;
 pub mod model;
+pub mod oled_ui;
 pub mod settings;
 pub mod time;
 

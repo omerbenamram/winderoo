@@ -377,30 +377,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7517c040926d7b02b111884aa089177db80878533127f7c1b480d852c5fb4112"
 
 [[package]]
-name = "display-interface"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ba2aab1ef3793e6f7804162debb5ac5edb93b3d650fbcc5aeb72fcd0e6c03a0"
-
-[[package]]
 name = "display-interface-i2c"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4895cd4e54e5536ef370d7f1eec787aad8275dd8ad15815aebfa71dd847b4ebf"
 dependencies = [
- "display-interface 0.4.1",
+ "display-interface",
  "embedded-hal 0.2.7",
-]
-
-[[package]]
-name = "display-interface-i2c"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d964fa85bbbb5a6ecd06e58699407ac5dc3e3ad72dac0ab7e6b0d00a1cd262d"
-dependencies = [
- "display-interface 0.5.0",
- "embedded-hal 1.0.0",
- "embedded-hal-async",
 ]
 
 [[package]]
@@ -410,7 +393,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "489378ad054862146fbd1f09f51d585ccbe4bd1e2feadcda2a13ac33f840e1a5"
 dependencies = [
  "byte-slice-cast",
- "display-interface 0.4.1",
+ "display-interface",
  "embedded-hal 0.2.7",
 ]
 
@@ -1313,8 +1296,8 @@ version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b37918f6137f2b58427181c3e10a731bef1061a9756b13ffbade64f21892acc6"
 dependencies = [
- "display-interface 0.4.1",
- "display-interface-i2c 0.4.0",
+ "display-interface",
+ "display-interface-i2c",
  "display-interface-spi",
  "embedded-graphics-core",
  "embedded-hal 0.2.7",
@@ -1597,7 +1580,8 @@ dependencies = [
 name = "winderoo-firmware"
 version = "0.1.0"
 dependencies = [
- "display-interface-i2c 0.5.0",
+ "display-interface",
+ "display-interface-i2c",
  "embedded-graphics",
  "embedded-svc",
  "esp-idf-hal",

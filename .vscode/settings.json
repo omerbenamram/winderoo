@@ -68,7 +68,10 @@
     "rust-analyzer.rustup.toolchain": "esp",
     "rust-analyzer.cargo.target": "xtensa-esp32-espidf",
     "rust-analyzer.cargo.features": [
-        "esp32"
+        "esp32",
+        "oled",
+        "home-assistant",
+        "pwm-motor"
     ],
     "rust-analyzer.cargo.extraArgs": [
         "-Z",
