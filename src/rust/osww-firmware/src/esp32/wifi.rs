@@ -18,9 +18,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use super::{
-    cors_allow_origin, read_request_body, Esp32Error, Hardware, SharedState, Storage, AP_SSID,
-};
+use super::http::{cors_allow_origin, read_request_body};
+use super::{Esp32Error, Hardware, SharedState, Storage, AP_SSID};
 
 #[derive(Debug, Clone)]
 pub(super) struct WifiCredentials {
