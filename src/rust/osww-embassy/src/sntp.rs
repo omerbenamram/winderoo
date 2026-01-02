@@ -4,6 +4,10 @@
 //! client implementation suitable for ESP32.
 
 use core::future::Future;
+#[cfg(feature = "embedded")]
+use alloc::boxed::Box;
+#[cfg(feature = "embedded")]
+use core::pin::Pin;
 
 /// NTP timestamp delta between 1900-01-01 and 1970-01-01 in seconds.
 pub const NTP_UNIX_DELTA: u64 = 2_208_988_800;
@@ -78,50 +82,66 @@ mod tests {
 
 /// Embassy-net backed SNTP client.
 #[cfg(feature = "embedded")]
-#[derive(Debug)]
 pub struct UdpSntpClient<'a, const RX: usize, const TX: usize> {
-    stack: embassy_net::Stack<'a>,
+    socket: embassy_net::udp::UdpSocket<'a>,
     server: embassy_net::IpEndpoint,
-    rx_buffer: [u8; RX],
-    tx_buffer: [u8; TX],
+    bound: bool,
 }
 
 #[cfg(feature = "embedded")]
 impl<'a, const RX: usize, const TX: usize> UdpSntpClient<'a, RX, TX> {
     /// Create a new UDP SNTP client.
-    pub fn new(stack: embassy_net::Stack<'a>, server: embassy_net::IpEndpoint) -> Self {
-        Self {
+    pub fn new(
+        stack: embassy_net::Stack<'a>,
+        server: embassy_net::IpEndpoint,
+        rx_meta: &'a mut [embassy_net::udp::PacketMetadata],
+        rx_buffer: &'a mut [u8; RX],
+        tx_meta: &'a mut [embassy_net::udp::PacketMetadata],
+        tx_buffer: &'a mut [u8; TX],
+    ) -> Self {
+        let socket = embassy_net::udp::UdpSocket::new(
             stack,
+            rx_meta,
+            rx_buffer,
+            tx_meta,
+            tx_buffer,
+        );
+        Self {
+            socket,
             server,
-            rx_buffer: [0u8; RX],
-            tx_buffer: [0u8; TX],
+            bound: false,
         }
     }
 }
 
 #[cfg(feature = "embedded")]
 impl<'a, const RX: usize, const TX: usize> SntpClient for UdpSntpClient<'a, RX, TX> {
-    type Future<'b> = impl Future<Output = Result<u64, SntpError>> + 'b
-    where
-        Self: 'b;
+    type Future<'b> = Pin<Box<dyn Future<Output = Result<u64, SntpError>> + 'b>> where Self: 'b;
 
     fn sync<'b>(&'b mut self) -> Self::Future<'b> {
-        async move {
-            use embassy_net::udp::UdpSocket;
+        Box::pin(async move {
+            if !self.bound {
+                self.socket
+                    .bind(0)
+                    .map_err(|_| SntpError::NetworkFailure)?;
+                self.bound = true;
+            }
 
-            let mut socket = UdpSocket::new(self.stack, &mut self.rx_buffer, &mut self.tx_buffer);
-            socket.bind(0).await.map_err(|_| SntpError::NetworkFailure)?;
             let request = build_request_packet();
-            socket
+            self.socket
                 .send_to(&request, self.server)
                 .await
                 .map_err(|_| SntpError::NetworkFailure)?;
             let mut response = [0u8; 48];
-            socket
+            let (len, _) = self
+                .socket
                 .recv_from(&mut response)
                 .await
                 .map_err(|_| SntpError::NetworkFailure)?;
+            if len < response.len() {
+                return Err(SntpError::InvalidResponse);
+            }
             parse_response_packet(&response)
-        }
+        })
     }
 }

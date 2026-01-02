@@ -1,0 +1,39 @@
+[package]
+name = "embassy-ha"
+version = "0.2.0"
+edition = "2024"
+authors = ["diogo464 <diogo464@d464.sh>"]
+description = "MQTT Home Assistant integration library for Embassy async runtime"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/diogo464/embassy-ha"
+readme = "README.md"
+keywords = ["homeassistant", "mqtt", "iot", "embedded", "embassy"]
+categories = ["embedded", "network-programming"]
+
+[features]
+default = []
+defmt = ["dep:defmt", "embassy-net/defmt", "embassy-sync/defmt"]
+tracing = ["dep:tracing"]
+
+[dependencies]
+embassy-net = { version = "0.7", features = ["medium-ip", "proto-ipv4", "tcp", "dns"] }
+heapless = "0.9"
+embassy-time = { version = "0.5" }
+serde-json-core = "0.6"
+serde = { version = "1", default-features = false, features = ["derive"] }
+defmt = { version = "1", optional = true }
+tracing = { version = "0.1", optional = true, default-features = false }
+embassy-sync = { version = "0.7" }
+embassy-futures = "0.1"
+embedded-io-async = "0.6"
+
+[dev-dependencies]
+embassy-time = { version = "0.5", features = ["std"] }
+embassy-executor = { version = "0.9", features = ["arch-std", "executor-thread"] }
+embassy-sync = { version = "0.7" }
+static_cell = "2.1"
+embedded-io-async = { version = "0.6", features = ["std"] }
+critical-section = { version = "1", features = ["std"] }
+rand = "0.9"
+tracing-subscriber = "0.3"
+tracing = "0.1"

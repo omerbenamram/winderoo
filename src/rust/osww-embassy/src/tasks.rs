@@ -122,7 +122,7 @@ pub enum RuntimeCommand {
 
 /// Channel type for runtime commands.
 pub type RuntimeCommandChannel<const N: usize> = embassy_sync::channel::Channel<
-    embassy_sync::blocking_mutex::raw::NoopRawMutex,
+    embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
     RuntimeCommand,
     N,
 >;
@@ -147,7 +147,7 @@ where
     wifi_status: &'a WifiStatus,
     commands: embassy_sync::channel::Receiver<
         'a,
-        embassy_sync::blocking_mutex::raw::NoopRawMutex,
+        embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
         RuntimeCommand,
         N,
     >,
@@ -175,7 +175,7 @@ where
         wifi_status: &'a WifiStatus,
         commands: embassy_sync::channel::Receiver<
             'a,
-            embassy_sync::blocking_mutex::raw::NoopRawMutex,
+            embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
             RuntimeCommand,
             N,
         >,
@@ -205,14 +205,53 @@ where
 
     async fn dispatch_events(
         &mut self,
-        events: alloc::vec::Vec<winderoo_firmware::controller::ControllerEvent>,
+        mut events: alloc::vec::Vec<winderoo_firmware::controller::ControllerEvent>,
     ) {
-        for event in events {
-            match event {
-                winderoo_firmware::controller::ControllerEvent::PauseSeconds(seconds) => {
-                    Timer::after(Duration::from_secs(seconds as u64)).await;
+        use embassy_futures::select::{select, Either};
+
+        loop {
+            let mut interrupted: Option<alloc::vec::Vec<winderoo_firmware::controller::ControllerEvent>> = None;
+
+            for event in events.into_iter() {
+                match event {
+                    winderoo_firmware::controller::ControllerEvent::PauseSeconds(seconds) => {
+                        // During long pauses, allow runtime commands (e.g. power off / reset) to
+                        // interrupt the pause so we don't blindly resume winding after the delay.
+                        match select(
+                            Timer::after(Duration::from_secs(seconds as u64)),
+                            self.commands.receive(),
+                        )
+                        .await
+                        {
+                            Either::First(_) => {}
+                            Either::Second(command) => {
+                                let now_epoch = self.time_source.now_epoch();
+                                let events = match command {
+                                    RuntimeCommand::ApplyPower(enabled) => self.controller.apply_power(enabled),
+                                    RuntimeCommand::ApplyTimer(enabled) => {
+                                        self.controller.apply_timer_enabled(enabled)
+                                    }
+                                    RuntimeCommand::ApplyUpdate(update) => {
+                                        self.controller.apply_update(update, now_epoch)
+                                    }
+                                    RuntimeCommand::Reset => self.controller.request_reset(),
+                                };
+                                interrupted = Some(events);
+                                // Abort the remaining (now stale) event sequence.
+                                break;
+                            }
+                        }
+                    }
+                    other => self.dispatcher.handle_event(other),
                 }
-                other => self.dispatcher.handle_event(other),
+            }
+
+            match interrupted {
+                Some(new_events) => {
+                    events = new_events;
+                    continue;
+                }
+                None => break,
             }
         }
     }
@@ -223,12 +262,13 @@ where
 
         let mut ticker = Ticker::every(self.tick_interval);
         loop {
-            match select(ticker.next(), self.commands.recv()).await {
+            match select(ticker.next(), self.commands.receive()).await {
                 Either::First(_) => {
                     let now_epoch = self.time_source.now_epoch();
                     let now_time = self.time_source.now_time_of_day();
                     let events = self.controller.tick(now_epoch, now_time);
                     self.dispatch_events(events).await;
+                    let now_epoch = self.time_source.now_epoch();
                     self.update_status_cache(now_epoch);
                 }
                 Either::Second(command) => {
@@ -251,6 +291,7 @@ where
                             self.dispatch_events(events).await;
                         }
                     }
+                    let now_epoch = self.time_source.now_epoch();
                     self.update_status_cache(now_epoch);
                 }
             }

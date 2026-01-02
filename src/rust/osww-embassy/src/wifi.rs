@@ -8,7 +8,7 @@
 use alloc::string::String;
 use core::future::Future;
 
-use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::{Channel, Receiver, Sender};
 
 use crate::state::WifiStatus;
@@ -136,7 +136,7 @@ impl ProvisioningConfig {
 }
 
 /// Channel type used to send Wi-Fi commands.
-pub type WifiCommandChannel<const N: usize> = Channel<NoopRawMutex, WifiCommand, N>;
+pub type WifiCommandChannel<const N: usize> = Channel<CriticalSectionRawMutex, WifiCommand, N>;
 
 /// Manages Wi-Fi connectivity and provisioning behavior.
 #[derive(Debug)]
@@ -149,7 +149,7 @@ where
     control: C,
     store: S,
     status: &'a WifiStatus,
-    commands: Receiver<'a, NoopRawMutex, WifiCommand, N>,
+    commands: Receiver<'a, CriticalSectionRawMutex, WifiCommand, N>,
     provisioning: ProvisioningConfig,
     reconnect_interval_secs: u64,
 }
@@ -165,7 +165,7 @@ where
         control: C,
         store: S,
         status: &'a WifiStatus,
-        commands: Receiver<'a, NoopRawMutex, WifiCommand, N>,
+        commands: Receiver<'a, CriticalSectionRawMutex, WifiCommand, N>,
         provisioning: ProvisioningConfig,
         reconnect_interval_secs: u64,
     ) -> Self {
@@ -255,12 +255,12 @@ where
 /// Convenience helper for sending Wi-Fi commands.
 #[derive(Debug, Clone)]
 pub struct WifiCommandSender<'a, const N: usize> {
-    sender: Sender<'a, NoopRawMutex, WifiCommand, N>,
+    sender: Sender<'a, CriticalSectionRawMutex, WifiCommand, N>,
 }
 
 impl<'a, const N: usize> WifiCommandSender<'a, N> {
     /// Create a new sender wrapper.
-    pub fn new(sender: Sender<'a, NoopRawMutex, WifiCommand, N>) -> Self {
+    pub fn new(sender: Sender<'a, CriticalSectionRawMutex, WifiCommand, N>) -> Self {
         Self { sender }
     }
 

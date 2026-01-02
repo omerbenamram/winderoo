@@ -134,6 +134,7 @@ pub struct WasmSimulator {
 
     // Pause handling
     pause_remaining_ms: u64,
+    pending_events: Vec<ControllerEvent>,
 }
 
 #[wasm_bindgen]
@@ -166,6 +167,7 @@ impl WasmSimulator {
             trace: Vec::new(),
             max_trace_entries: 500,
             pause_remaining_ms: 0,
+            pending_events: Vec::new(),
         }
     }
 
@@ -300,10 +302,18 @@ impl WasmSimulator {
                 self.now_ms += self.pause_remaining_ms;
                 self.pause_remaining_ms = 0;
                 self.push_trace(TracedEvent::PauseEnd);
+                // Resume any deferred events that were scheduled after the pause.
+                if !self.pending_events.is_empty() {
+                    let events = core::mem::take(&mut self.pending_events);
+                    self.dispatch_events(events);
+                }
                 // Process remaining time
                 if remaining > 0 {
-                    return self.step(remaining as u32);
+                    let changed_here =
+                        old_motor != self.motor_running || (self.motor_angle - old_angle).abs() > 0.01;
+                    return self.step(remaining as u32) || changed_here;
                 }
+                return old_motor != self.motor_running || (self.motor_angle - old_angle).abs() > 0.01;
             } else {
                 self.pause_remaining_ms -= delta_ms;
                 self.now_ms += delta_ms;
@@ -342,6 +352,7 @@ impl WasmSimulator {
     /// Apply power toggle.
     #[wasm_bindgen(js_name = setPower)]
     pub fn set_power(&mut self, enabled: bool) {
+        self.cancel_pause();
         let events = self.controller.apply_power(enabled);
         self.dispatch_events(events);
     }
@@ -349,6 +360,7 @@ impl WasmSimulator {
     /// Apply timer enabled toggle.
     #[wasm_bindgen(js_name = setTimerEnabled)]
     pub fn set_timer_enabled(&mut self, enabled: bool) {
+        self.cancel_pause();
         let events = self.controller.apply_timer_enabled(enabled);
         self.dispatch_events(events);
     }
@@ -356,6 +368,7 @@ impl WasmSimulator {
     /// Start winding routine.
     #[wasm_bindgen]
     pub fn start(&mut self) {
+        self.cancel_pause();
         let update = self.build_update(UpdateAction::Start);
         let events = self.controller.apply_update(update, self.now_ms / 1000);
         self.dispatch_events(events);
@@ -364,6 +377,7 @@ impl WasmSimulator {
     /// Stop winding routine.
     #[wasm_bindgen]
     pub fn stop(&mut self) {
+        self.cancel_pause();
         let update = self.build_update(UpdateAction::Stop);
         let events = self.controller.apply_update(update, self.now_ms / 1000);
         self.dispatch_events(events);
@@ -406,10 +420,9 @@ impl WasmSimulator {
     /// Request device reset.
     #[wasm_bindgen]
     pub fn reset(&mut self) {
+        self.cancel_pause();
         let events = self.controller.request_reset();
         self.dispatch_events(events);
-        // Simulate reboot
-        self.restart_from_flash();
     }
 
     /// Set simulation speed (tick interval in ms).
@@ -459,8 +472,18 @@ impl WasmSimulator {
     }
 
     fn dispatch_events(&mut self, events: Vec<ControllerEvent>) {
-        for event in events {
-            self.handle_event(event);
+        let mut iter = events.into_iter();
+        while let Some(event) = iter.next() {
+            match event {
+                ControllerEvent::PauseSeconds(seconds) => {
+                    // Defer the remaining events until the pause expires, matching the embedded runtime.
+                    self.push_trace(TracedEvent::PauseStart { seconds });
+                    self.pause_remaining_ms = (seconds as u64) * 1000;
+                    self.pending_events.extend(iter);
+                    return;
+                }
+                other => self.handle_event(other),
+            }
         }
     }
 
@@ -482,6 +505,8 @@ impl WasmSimulator {
                 self.push_trace(TracedEvent::MotorStop);
             }
             ControllerEvent::PauseSeconds(seconds) => {
+                // Should normally be handled by `dispatch_events` so we can defer subsequent events,
+                // but keep this as a safety net.
                 self.push_trace(TracedEvent::PauseStart { seconds });
                 self.pause_remaining_ms = (seconds as u64) * 1000;
             }
@@ -523,7 +548,17 @@ impl WasmSimulator {
             }
             ControllerEvent::RestartDevice => {
                 self.push_trace(TracedEvent::RestartDevice);
+                // Mirror the embedded runtime: a restart event reboots immediately.
+                self.restart_from_flash();
             }
+        }
+    }
+
+    fn cancel_pause(&mut self) {
+        if self.pause_remaining_ms > 0 {
+            self.pause_remaining_ms = 0;
+            self.pending_events.clear();
+            self.push_trace(TracedEvent::PauseEnd);
         }
     }
 

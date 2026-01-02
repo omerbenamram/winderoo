@@ -21,7 +21,7 @@ use esp_hal::gpio::{Input, InputConfig, Pull};
 use esp_hal::timer::timg::TimerGroup;
 #[cfg(feature = "oled")]
 use esp_hal::time::Rate;
-use esp_hal::Delay;
+use esp_hal::delay::Delay;
 use esp_hal::{rng::Rng, Config as HalConfig};
 use esp_println::logger::init_logger;
 use log::info;
@@ -55,7 +55,7 @@ macro_rules! mk_static {
 /// Runtime command queue depth.
 const RUNTIME_QUEUE_DEPTH: usize = 8;
 /// Wi-Fi command queue depth.
-const WIFI_QUEUE_DEPTH: usize = 4;
+const WIFI_QUEUE_DEPTH: usize = 8;
 
 /// Size of the reserved flash region for Winderoo persistence.
 const STORAGE_TOTAL_BYTES: usize = 64 * 1024;
@@ -94,19 +94,6 @@ static RTC_EPOCH: Mutex<CriticalSectionRawMutex, RefCell<u64>> = Mutex::new(RefC
 static RUNTIME_COMMANDS: RuntimeCommandChannel<RUNTIME_QUEUE_DEPTH> = RuntimeCommandChannel::new();
 /// Shared Wi-Fi command channel.
 static WIFI_COMMANDS: WifiCommandChannel<WIFI_QUEUE_DEPTH> = WifiCommandChannel::new();
-
-#[cfg(feature = "mdns")]
-static MDNS_BROADCAST: embassy_sync::signal::Signal<embassy_sync::blocking_mutex::raw::NoopRawMutex, ()> =
-    embassy_sync::signal::Signal::new();
-#[cfg(feature = "mdns")]
-static MDNS_RECV_BUF: edge_mdns::buf::VecBufAccess<embassy_sync::blocking_mutex::raw::NoopRawMutex, 1024> =
-    edge_mdns::buf::VecBufAccess::new();
-#[cfg(feature = "mdns")]
-static MDNS_SEND_BUF: edge_mdns::buf::VecBufAccess<embassy_sync::blocking_mutex::raw::NoopRawMutex, 1024> =
-    edge_mdns::buf::VecBufAccess::new();
-#[cfg(feature = "mdns")]
-static MDNS_UDP_BUFFERS: edge_nal_embassy::UdpBuffers<1, 1024, 1024, 2> =
-    edge_nal_embassy::UdpBuffers::new();
 
 #[cfg(feature = "oled")]
 type DisplayDriver = winderoo_embassy::hardware::Ssd1306Display<I2c<'static, esp_hal::Blocking>>;
@@ -153,7 +140,7 @@ where
 {
     fn reset(&mut self) {
         self.creds.clear();
-        esp_hal::reset::software_reset();
+        esp_hal::system::software_reset();
     }
 }
 
@@ -162,7 +149,10 @@ struct LedGpioDriver<PIN> {
     pin: PIN,
 }
 
-impl<PIN> LedGpioDriver<PIN> {
+impl<PIN> LedGpioDriver<PIN>
+where
+    PIN: embedded_hal::digital::OutputPin,
+{
     fn new(pin: PIN) -> Self {
         Self { pin }
     }
@@ -259,24 +249,26 @@ async fn system_task(
 #[embassy_executor::task]
 async fn dhcp_server_task(stack: embassy_net::Stack<'static>) -> ! {
     use embassy_time::Timer;
-    use esp_hal_dhcp_server::{DhcpServerConfig, SimpleDhcpLeaser};
+    use esp_hal_dhcp_server::simple_leaser::SimpleDhcpLeaser;
+    use esp_hal_dhcp_server::structs::DhcpServerConfig;
 
     let config = DhcpServerConfig {
-        ip: embassy_net::Ipv4Address::new(192, 168, 4, 1),
+        ip: core::net::Ipv4Addr::new(192, 168, 4, 1),
         lease_time: Duration::from_secs(3600),
         gateways: &[],
         subnet: None,
         dns: &[],
+        use_captive_portal: false,
     };
 
     let mut leaser = SimpleDhcpLeaser {
-        start: embassy_net::Ipv4Address::new(192, 168, 4, 50),
-        end: embassy_net::Ipv4Address::new(192, 168, 4, 200),
+        start: core::net::Ipv4Addr::new(192, 168, 4, 50),
+        end: core::net::Ipv4Addr::new(192, 168, 4, 200),
         leases: Default::default(),
     };
 
     // Run forever. If we ever need to stop, we can call `esp_hal_dhcp_server::dhcp_close()`.
-    esp_hal_dhcp_server::run_dhcp_server(stack, config, &mut leaser).await;
+    let _ = esp_hal_dhcp_server::run_dhcp_server(stack, config, &mut leaser).await;
 
     // Should never return, but keep the task type as `!` anyway.
     loop {
@@ -289,13 +281,23 @@ async fn dhcp_server_task(stack: embassy_net::Stack<'static>) -> ! {
 async fn mdns_task(stack: embassy_net::Stack<'static>) -> ! {
     use core::net::{Ipv4Addr, Ipv6Addr};
 
+    use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+    use embassy_sync::signal::Signal;
     use edge_mdns::host::{Host, Service, ServiceAnswers};
     use edge_mdns::io::{bind, Mdns, IPV4_DEFAULT_SOCKET};
     use edge_mdns::HostAnswersMdnsHandler;
 
     use embassy_time::Timer;
 
-    let udp = edge_nal_embassy::Udp::new(stack, &MDNS_UDP_BUFFERS);
+    use edge_nal::UdpSplit;
+
+    let broadcast: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+    let recv_buf: edge_mdns::buf::VecBufAccess<CriticalSectionRawMutex, 1024> =
+        edge_mdns::buf::VecBufAccess::new();
+    let send_buf: edge_mdns::buf::VecBufAccess<CriticalSectionRawMutex, 1024> =
+        edge_mdns::buf::VecBufAccess::new();
+    let udp_buffers: edge_nal_embassy::UdpBuffers<1, 1024, 1024, 2> = edge_nal_embassy::UdpBuffers::new();
+    let udp = edge_nal_embassy::Udp::new(stack, &udp_buffers);
 
     loop {
         stack.wait_config_up().await;
@@ -321,17 +323,17 @@ async fn mdns_task(stack: embassy_net::Stack<'static>) -> ! {
             None,
             recv,
             send,
-            &MDNS_RECV_BUF,
-            &MDNS_SEND_BUF,
+            &recv_buf,
+            &send_buf,
             esp_hal::rng::Rng::new(),
-            &MDNS_BROADCAST,
+            &broadcast,
         );
 
         let host = Host {
             hostname: "winderoo",
             ipv4,
             ipv6: Ipv6Addr::UNSPECIFIED,
-            ttl: 120u32.into(),
+            ttl: edge_mdns::domain::base::Ttl::from_secs(120),
         };
         let service = Service {
             name: "winderoo",
@@ -359,7 +361,7 @@ async fn http_server_task(
     status_cache: &'static StatusCache,
     runtime_sender: embassy_sync::channel::Sender<
         'static,
-        embassy_sync::blocking_mutex::raw::NoopRawMutex,
+        embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
         winderoo_embassy::tasks::RuntimeCommand,
         RUNTIME_QUEUE_DEPTH,
     >,
@@ -394,13 +396,12 @@ async fn external_button_task(
     mut button: Input<'static>,
     runtime_sender: embassy_sync::channel::Sender<
         'static,
-        embassy_sync::blocking_mutex::raw::NoopRawMutex,
+        embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
         winderoo_embassy::tasks::RuntimeCommand,
         RUNTIME_QUEUE_DEPTH,
     >,
 ) -> ! {
     use embassy_time::Timer;
-    use embedded_hal_async::digital::Wait;
     use winderoo_embassy::tasks::RuntimeCommand;
 
     loop {
@@ -435,7 +436,7 @@ async fn main(spawner: Spawner) -> ! {
     );
 
     // RNG for network seeds + controller RNG seed.
-    let mut rng = Rng::new(peripherals.RNG);
+    let mut rng = Rng::new();
     let net_seed = rng.random() as u64 | ((rng.random() as u64) << 32);
     let net_seed_ap = rng.random() as u64 | ((rng.random() as u64) << 32);
     let controller_seed = rng.random();
@@ -573,7 +574,21 @@ async fn main(spawner: Spawner) -> ! {
     );
 
     // System services.
-    let sntp = winderoo_embassy::sntp::UdpSntpClient::<'static, 128, 128>::new(sta_stack, NTP_SERVER);
+    let sntp_rx_meta: &'static mut [embassy_net::udp::PacketMetadata; 1] =
+        mk_static!([embassy_net::udp::PacketMetadata; 1], [embassy_net::udp::PacketMetadata::EMPTY; 1]);
+    let sntp_tx_meta: &'static mut [embassy_net::udp::PacketMetadata; 1] =
+        mk_static!([embassy_net::udp::PacketMetadata; 1], [embassy_net::udp::PacketMetadata::EMPTY; 1]);
+    let sntp_rx_buf: &'static mut [u8; 128] = mk_static!([u8; 128], [0u8; 128]);
+    let sntp_tx_buf: &'static mut [u8; 128] = mk_static!([u8; 128], [0u8; 128]);
+
+    let sntp = winderoo_embassy::sntp::UdpSntpClient::<'static, 128, 128>::new(
+        sta_stack,
+        NTP_SERVER,
+        sntp_rx_meta,
+        sntp_rx_buf,
+        sntp_tx_meta,
+        sntp_tx_buf,
+    );
     let reset = ResetWithWifiClear::new(reset_wifi_store);
     let system = winderoo_embassy::system::SystemTask::new(
         settings_store,

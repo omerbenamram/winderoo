@@ -4,7 +4,11 @@
 //! the `esp-wifi` and `esp-hal` crates when the `esp32` feature is enabled.
 
 #[cfg(feature = "esp32")]
+use alloc::boxed::Box;
+#[cfg(feature = "esp32")]
 use core::future::Future;
+#[cfg(feature = "esp32")]
+use core::pin::Pin;
 
 #[cfg(feature = "esp32")]
 use crate::system::ResetControl;
@@ -23,13 +27,12 @@ pub struct EspReset;
 #[cfg(feature = "esp32")]
 impl ResetControl for EspReset {
     fn reset(&mut self) {
-        esp_hal::reset::software_reset();
+        esp_hal::system::software_reset();
     }
 }
 
 /// Wi-Fi control wrapper backed by `esp-wifi`.
 #[cfg(feature = "esp32")]
-#[derive(Debug)]
 pub struct EspWifiControl<'a> {
     controller: WifiController<'a>,
 }
@@ -44,12 +47,12 @@ impl<'a> EspWifiControl<'a> {
 
 #[cfg(feature = "esp32")]
 impl<'a> WifiControl for EspWifiControl<'a> {
-    type ConnectFuture<'b> = impl Future<Output = Result<(), WifiError>> + 'b where Self: 'b;
-    type StartApFuture<'b> = impl Future<Output = Result<(), WifiError>> + 'b where Self: 'b;
-    type DisconnectFuture<'b> = impl Future<Output = Result<(), WifiError>> + 'b where Self: 'b;
+    type ConnectFuture<'b> = Pin<Box<dyn Future<Output = Result<(), WifiError>> + 'b>> where Self: 'b;
+    type StartApFuture<'b> = Pin<Box<dyn Future<Output = Result<(), WifiError>> + 'b>> where Self: 'b;
+    type DisconnectFuture<'b> = Pin<Box<dyn Future<Output = Result<(), WifiError>> + 'b>> where Self: 'b;
 
     fn connect<'b>(&'b mut self, credentials: &'b WifiCredentials) -> Self::ConnectFuture<'b> {
-        async move {
+        Box::pin(async move {
             if matches!(self.controller.is_started(), Ok(true)) {
                 let _ = self.controller.stop_async().await;
             }
@@ -71,11 +74,11 @@ impl<'a> WifiControl for EspWifiControl<'a> {
                 .await
                 .map_err(|_| WifiError::ConnectionFailed)?;
             Ok(())
-        }
+        })
     }
 
     fn start_ap<'b>(&'b mut self, credentials: &'b WifiCredentials) -> Self::StartApFuture<'b> {
-        async move {
+        Box::pin(async move {
             if matches!(self.controller.is_started(), Ok(true)) {
                 let _ = self.controller.stop_async().await;
             }
@@ -93,17 +96,17 @@ impl<'a> WifiControl for EspWifiControl<'a> {
                 .await
                 .map_err(|_| WifiError::ProvisioningFailed)?;
             Ok(())
-        }
+        })
     }
 
     fn disconnect<'b>(&'b mut self) -> Self::DisconnectFuture<'b> {
-        async move {
+        Box::pin(async move {
             self.controller
                 .disconnect_async()
                 .await
                 .map_err(|_| WifiError::ConnectionFailed)?;
             Ok(())
-        }
+        })
     }
 
     fn is_connected(&self) -> bool {

@@ -14,7 +14,7 @@ use winderoo_firmware::time::TimeOfDay;
 
 pub type RuntimeSender = embassy_sync::channel::Sender<
     'static,
-    embassy_sync::blocking_mutex::raw::NoopRawMutex,
+    embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
     RuntimeCommand,
     { crate::RUNTIME_QUEUE_DEPTH },
 >;
@@ -52,8 +52,16 @@ fn dir_to_number(dir: Direction) -> f32 {
     }
 }
 
+fn round_to_i32(value: f32) -> i32 {
+    if value >= 0.0 {
+        (value + 0.5) as i32
+    } else {
+        (value - 0.5) as i32
+    }
+}
+
 fn number_to_dir(value: f32) -> Direction {
-    match value.round() as i32 {
+    match round_to_i32(value) {
         0 => Direction::CounterClockwise,
         2 => Direction::Clockwise,
         _ => Direction::Both,
@@ -61,7 +69,7 @@ fn number_to_dir(value: f32) -> Direction {
 }
 
 fn clamp_u16(value: f32, min: u16, max: u16) -> u16 {
-    let v = value.round() as i32;
+    let v = round_to_i32(value);
     let min = min as i32;
     let max = max as i32;
     v.clamp(min, max) as u16

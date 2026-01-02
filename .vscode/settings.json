@@ -61,6 +61,11 @@
     },
     "rust-analyzer.linkedProjects": [
         "src/rust/osww-firmware/Cargo.toml",
-        "src/rust/osww-embassy/Cargo.toml"
-    ]
+        "src/rust/osww-embassy/Cargo.toml",
+        "src/rust/winderoo-esp32/Cargo.toml"
+    ],
+    "rust-analyzer.server.extraEnv": {
+        "RUSTUP_TOOLCHAIN": "esp",
+        "PATH": "${env:HOME}/.cargo/bin:${env:PATH}"
+    }
 }

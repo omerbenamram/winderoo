@@ -42,7 +42,7 @@ pub struct ApiState<'a, const N: usize> {
     /// Channel for pushing runtime commands to the controller task.
     pub runtime_sender: embassy_sync::channel::Sender<
         'a,
-        embassy_sync::blocking_mutex::raw::NoopRawMutex,
+        embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
         RuntimeCommand,
         N,
     >,
@@ -56,7 +56,7 @@ impl<'a, const N: usize> ApiState<'a, N> {
         status_cache: &'a StatusCache,
         runtime_sender: embassy_sync::channel::Sender<
             'a,
-            embassy_sync::blocking_mutex::raw::NoopRawMutex,
+            embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
             RuntimeCommand,
             N,
         >,
@@ -179,7 +179,7 @@ struct WifiPayload {
 /// Build the full HTTP router (API + static assets).
 pub fn build_router<'a, const N: usize>(
     state: ApiState<'a, N>,
-) -> Router<impl picoserve::routing::PathRouter<ApiState<'a, N>>, ApiState<'a, N>> {
+) -> Router<impl picoserve::routing::PathRouter + use<'a, N>> {
     use routing::{get, get_service, post};
 
     Router::new()
@@ -221,6 +221,8 @@ pub fn build_router<'a, const N: usize>(
             "/assets/i18n/pt-BR.json",
             get_service(static_assets::I18N_PT),
         )
+        // `picoserve::Server` expects a router with `State = ()`. We capture our real state
+        // here and ignore the incoming `()` state.
         .with_state(state)
 }
 

@@ -1,0 +1,16 @@
+[build]
+target = "xtensa-esp32-none-elf"
+
+[unstable]
+# The esp toolchain does not ship prebuilt core/alloc for Xtensa targets.
+# Build them from source automatically (requires nightly cargo, which `esp` provides).
+build-std = ["core", "alloc"]
+build-std-features = ["compiler-builtins-mem"]
+
+[target.xtensa-esp32-none-elf]
+# For end-to-end builds, ensure the Xtensa GCC toolchain is on PATH
+# (e.g. by sourcing the `export-esp.sh` file created by `espup install`).
+rustflags = [
+  "-C", "link-arg=-Tlinkall.x",
+]
+
