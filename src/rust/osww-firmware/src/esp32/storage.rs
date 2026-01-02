@@ -21,7 +21,10 @@ impl Storage {
     pub(super) fn new(root: &str, settings_file: &str) -> Self {
         let root = PathBuf::from(root);
         let settings_path = root.join(settings_file);
-        Self { root, settings_path }
+        Self {
+            root,
+            settings_path,
+        }
     }
 
     pub(super) fn load_or_init(&self) -> Result<StoredSettings, Esp32Error> {
@@ -112,4 +115,3 @@ impl StaticAsset {
         })
     }
 }
-
