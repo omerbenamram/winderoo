@@ -179,8 +179,15 @@ struct WifiPayload {
 /// Build the full HTTP router (API + static assets).
 pub fn build_router<'a, const N: usize>(
     state: ApiState<'a, N>,
+    root_wifi_portal: bool,
 ) -> Router<impl picoserve::routing::PathRouter + use<'a, N>> {
     use routing::{get, get_service, post};
+
+    let root = if root_wifi_portal {
+        static_assets::WIFI_HTML
+    } else {
+        static_assets::INDEX_HTML
+    };
 
     Router::new()
         .route("/api/status", get(handle_status).options(cors_preflight))
@@ -189,7 +196,19 @@ pub fn build_router<'a, const N: usize>(
         .route("/api/update", post(handle_update).options(cors_preflight))
         .route("/api/reset", get(handle_reset).options(cors_preflight))
         .route("/api/wifi", post(handle_wifi).options(cors_preflight))
-        .route("/", get_service(static_assets::INDEX_HTML))
+        .route("/wifi", get_service(static_assets::WIFI_HTML))
+        // On the AP server we serve the Wi‑Fi portal at `/` to behave more like WiFiManager.
+        .route("/", get_service(root.clone()))
+        // Captive portal probes (Android/iOS/Windows). We intentionally return HTML (not 204),
+        // which triggers the OS captive portal UI when DNS hijacks these hosts to the device.
+        .route("/generate_204", get_service(root.clone()))
+        .route("/gen_204", get_service(root.clone()))
+        .route("/hotspot-detect.html", get_service(root.clone()))
+        .route("/fwlink", get_service(root.clone()))
+        .route("/connecttest.txt", get_service(root))
+        // Always keep the full app reachable, even when `/` is the Wi‑Fi portal.
+        .route("/app", get_service(static_assets::INDEX_HTML))
+        .route("/app/", get_service(static_assets::INDEX_HTML))
         .route("/index.html", get_service(static_assets::INDEX_HTML))
         .route("/main.js", get_service(static_assets::MAIN_JS))
         .route("/polyfills.js", get_service(static_assets::POLYFILLS_JS))
@@ -314,6 +333,11 @@ async fn handle_update<'a, const N: usize>(
 
 /// API handler for `/api/reset`.
 async fn handle_reset<'a, const N: usize>(State(state): State<ApiState<'a, N>>) -> ApiResponse {
+    // Match Arduino behavior: `/api/reset` clears stored Wi‑Fi credentials and reboots.
+    // Restart is handled by the controller/system tasks.
+    if let Some(sender) = &state.wifi_sender {
+        sender.send(WifiCommand::ForgetCredentials).await;
+    }
     let _ = state.runtime_sender.send(RuntimeCommand::Reset).await;
     match serde_json::to_string(&ResetResponse::new()) {
         Ok(json) => ApiResponse::json(json),
@@ -423,6 +447,11 @@ mod static_assets {
         include_bytes!("../../../../data/settings.json"),
         CACHE_NONE,
     );
+    pub const WIFI_HTML: File = plain_file(
+        File::MIME_HTML,
+        include_bytes!("../../../../data/wifi.html"),
+        CACHE_NONE,
+    );
     pub const I18N_EN: File = plain_file(
         "application/json; charset=utf-8",
         include_bytes!("../../../../data/assets/i18n/en-US.json"),
@@ -455,6 +484,7 @@ mod tests {
     use super::*;
     use crate::state::StatusCache;
     use crate::tasks::{RuntimeCommand, RuntimeCommandChannel};
+    use crate::wifi::{WifiCommand, WifiCommandChannel, WifiCommandSender};
     use winderoo_firmware::model::{
         Direction, RoutineState, RtcConfig, RuntimeState, ScreenSchedule, ScreenState, TimerConfig,
         WinderStatus,
@@ -595,5 +625,51 @@ mod tests {
 
         let command = futures::executor::block_on(runtime_channel.receiver().receive());
         assert_eq!(command, RuntimeCommand::ApplyTimer(true));
+    }
+
+    #[test]
+    fn reset_forgets_wifi_and_reboots() {
+        let cache = StatusCache::new(sample_snapshot());
+        let runtime_channel: RuntimeCommandChannel<4> = RuntimeCommandChannel::new();
+        let wifi_channel: WifiCommandChannel<4> = WifiCommandChannel::new();
+        let state = ApiState::new(
+            &cache,
+            runtime_channel.sender(),
+            Some(WifiCommandSender::new(wifi_channel.sender())),
+        );
+
+        let response = futures::executor::block_on(handle_reset(State(state)));
+        assert_eq!(response.status, StatusCode::OK);
+
+        let wifi_cmd = futures::executor::block_on(wifi_channel.receiver().receive());
+        assert_eq!(wifi_cmd, WifiCommand::ForgetCredentials);
+
+        let rt_cmd = futures::executor::block_on(runtime_channel.receiver().receive());
+        assert_eq!(rt_cmd, RuntimeCommand::Reset);
+    }
+
+    #[test]
+    fn wifi_enabled_sends_set_credentials() {
+        let cache = StatusCache::new(sample_snapshot());
+        let runtime_channel: RuntimeCommandChannel<4> = RuntimeCommandChannel::new();
+        let wifi_channel: WifiCommandChannel<4> = WifiCommandChannel::new();
+        let state = ApiState::new(
+            &cache,
+            runtime_channel.sender(),
+            Some(WifiCommandSender::new(wifi_channel.sender())),
+        );
+
+        let body = br#"{"ssid":"MySSID","password":"MyPassword"}"#.to_vec();
+        let response = futures::executor::block_on(handle_wifi(State(state), body));
+        assert_eq!(response.status, StatusCode::NO_CONTENT);
+
+        let wifi_cmd = futures::executor::block_on(wifi_channel.receiver().receive());
+        match wifi_cmd {
+            WifiCommand::SetCredentials(creds) => {
+                assert_eq!(creds.ssid, "MySSID");
+                assert_eq!(creds.password, "MyPassword");
+            }
+            other => panic!("unexpected wifi command: {other:?}"),
+        }
     }
 }

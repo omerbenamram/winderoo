@@ -35,4 +35,6 @@ pub(crate) struct EntityConfig {
     pub step: Option<f32>,
     pub mode: Option<&'static str>,
     pub suggested_display_precision: Option<u8>,
+    /// Options list for select entities.
+    pub options: Option<&'static [&'static str]>,
 }

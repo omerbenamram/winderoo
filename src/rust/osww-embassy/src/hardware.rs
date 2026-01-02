@@ -35,6 +35,8 @@ pub trait DisplayControl {
     fn draw_dynamic(&mut self);
     /// Render a notification banner.
     fn notify(&mut self, message: &str);
+    /// Toggle a small "saving" indicator (best-effort; implementations may ignore it).
+    fn set_saving(&mut self, saving: bool);
 }
 
 /// System hooks for persistence, time sync, and resets.
@@ -56,6 +58,7 @@ impl DisplayControl for NoopDisplay {
     fn draw_static(&mut self, _title: &str) {}
     fn draw_dynamic(&mut self) {}
     fn notify(&mut self, _message: &str) {}
+    fn set_saving(&mut self, _saving: bool) {}
 }
 
 /// SSD1306 OLED display driver (128x64) using I2C + embedded-graphics.
@@ -71,6 +74,7 @@ pub struct Ssd1306Display<I2C> {
     >,
     status_cache: &'static crate::state::StatusCache,
     title: heapless::String<24>,
+    saving_frames: u8,
 }
 
 #[cfg(feature = "oled")]
@@ -104,61 +108,192 @@ where
             display,
             status_cache,
             title: heapless::String::new(),
+            saving_frames: 0,
         }
     }
 
     fn redraw(&mut self, notification: Option<&str>) {
-        use embedded_graphics::mono_font::{ascii::FONT_6X10, MonoTextStyle};
+        use embedded_graphics::mono_font::{
+            ascii::{FONT_10X20, FONT_6X10},
+            MonoTextStyle,
+        };
         use embedded_graphics::pixelcolor::BinaryColor;
         use embedded_graphics::prelude::*;
-        use embedded_graphics::primitives::{PrimitiveStyle, Rectangle};
+        use embedded_graphics::primitives::{Circle, Line, PrimitiveStyle, Rectangle, Triangle};
         use embedded_graphics::text::{Baseline, Text};
 
-        let style = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
+        const WIDTH: i32 = 128;
+
+        // Mirrors the Arduino layout:
+        // - Header banner: 0..14
+        // - Static box: lines at y=14 and y=50, vertical divider at x=64
+        // - Dynamic values: big text in the middle
+        // - Status row: wifi icon + timer at y≈54
+        const HEADER_H: i32 = 14;
+        const MIDLINE_Y: i32 = 50;
+        const DIVIDER_X: i32 = 64;
+
+        let style_small = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
+        let style_big = MonoTextStyle::new(&FONT_10X20, BinaryColor::On);
+
+        fn center_x(font: &embedded_graphics::mono_font::MonoFont, text: &str, width: i32) -> i32 {
+            let char_w = font.character_size.width as i32;
+            let w = (text.as_bytes().len() as i32) * char_w;
+            ((width - w).max(0)) / 2
+        }
 
         self.display.clear_buffer();
 
-        // Simple frame + title.
-        let _ = Rectangle::new(Point::new(0, 0), Size::new(128, 64))
+        // Header: title (centered) + underline.
+        let title_x = center_x(&FONT_6X10, self.title.as_str(), WIDTH);
+        let _ = Text::with_baseline(
+            self.title.as_str(),
+            Point::new(title_x, 3),
+            style_small,
+            Baseline::Top,
+        )
+        .draw(&mut self.display);
+        let _ = Line::new(Point::new(0, HEADER_H), Point::new(WIDTH - 1, HEADER_H))
             .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
             .draw(&mut self.display);
 
-        let _ = Text::with_baseline(&self.title, Point::new(4, 2), style, Baseline::Top)
+        // Static grid.
+        let _ = Line::new(Point::new(0, MIDLINE_Y), Point::new(WIDTH - 1, MIDLINE_Y))
+            .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
+            .draw(&mut self.display);
+        let _ = Line::new(
+            Point::new(DIVIDER_X, HEADER_H),
+            Point::new(DIVIDER_X, MIDLINE_Y),
+        )
+        .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
+        .draw(&mut self.display);
+
+        // Labels.
+        let _ = Text::with_baseline("TPD", Point::new(4, 18), style_small, Baseline::Top)
+            .draw(&mut self.display);
+        let _ = Text::with_baseline("DIR", Point::new(71, 18), style_small, Baseline::Top)
             .draw(&mut self.display);
 
         if let Some(message) = notification {
-            // Center-ish notification (wrapped).
-            let mut y = 22;
+            // Notification banner: filled header bar + centered text (wrapped-ish).
+            let _ = Rectangle::new(Point::new(0, 0), Size::new(WIDTH as u32, HEADER_H as u32))
+                .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+                .draw(&mut self.display);
+
+            // Text in "off" (inverted).
+            let style_inv = MonoTextStyle::new(&FONT_6X10, BinaryColor::Off);
+
+            // Keep it simple: up to 3 lines, roughly centered.
+            let mut y = 2;
             for chunk in message.as_bytes().chunks(18).take(3) {
                 if let Ok(line) = core::str::from_utf8(chunk) {
-                    let _ = Text::with_baseline(line, Point::new(4, y), style, Baseline::Top)
+                    let x = center_x(&FONT_6X10, line, WIDTH);
+                    let _ = Text::with_baseline(line, Point::new(x, y), style_inv, Baseline::Top)
                         .draw(&mut self.display);
                 }
-                y += 12;
+                y += 10;
             }
         } else {
             // Dynamic snapshot values.
             let snapshot = self.status_cache.snapshot();
-            let mut line1 = heapless::String::<32>::new();
-            let _ = line1.push_str(snapshot.status.as_str());
-            let _ = Text::with_baseline(&line1, Point::new(4, 18), style, Baseline::Top)
+
+            // Left big number: rotations per day.
+            let mut tpd = heapless::String::<8>::new();
+            let _ = core::fmt::write(&mut tpd, format_args!("{}", snapshot.rotations_per_day));
+            let tpd_x = 8;
+            let _ =
+                Text::with_baseline(&tpd, Point::new(tpd_x, 30), style_big, Baseline::Top)
+                    .draw(&mut self.display);
+
+            // Right big direction.
+            let dir = snapshot.direction.as_api_str();
+            // Aim to center within the right panel.
+            let dir_x = DIVIDER_X + 10;
+            let _ = Text::with_baseline(dir, Point::new(dir_x, 30), style_big, Baseline::Top)
                 .draw(&mut self.display);
 
-            let mut line2 = heapless::String::<32>::new();
-            let _ = core::fmt::write(
-                &mut line2,
-                format_args!("TPD {} {:?}", snapshot.rotations_per_day, snapshot.direction),
-            );
-            let _ = Text::with_baseline(&line2, Point::new(4, 30), style, Baseline::Top)
+            // Progress bar (derived from epochs, since API parity doesn't expose cycleProgress).
+            let start = snapshot.start_time_epoch;
+            let now = snapshot.current_time_epoch;
+            let end = snapshot.estimated_routine_finish_epoch;
+            let ratio = if end > start && now >= start {
+                let elapsed = (now - start) as f32;
+                let total = (end - start) as f32;
+                (elapsed / total).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let bar_w = (ratio * (WIDTH as f32)) as i32;
+            if bar_w > 0 {
+                let _ = Rectangle::new(
+                    Point::new(0, MIDLINE_Y),
+                    Size::new(bar_w as u32, 2),
+                )
+                .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+                .draw(&mut self.display);
+            }
+
+            // Wi‑Fi icon + bars (Arduino thresholds).
+            // Triangle + mast.
+            let _ = Triangle::new(
+                Point::new(4, 54),
+                Point::new(10, 54),
+                Point::new(7, 58),
+            )
+            .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
+            .draw(&mut self.display);
+            let _ = Line::new(Point::new(7, 58), Point::new(7, 62))
+                .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
                 .draw(&mut self.display);
 
-            let mut line3 = heapless::String::<32>::new();
-            let _ = core::fmt::write(
-                &mut line3,
-                format_args!("Timer {:02}:{:02} {}", snapshot.timer_hour, snapshot.timer_minutes, if snapshot.timer_enabled { "ON" } else { "OFF" }),
-            );
-            let _ = Text::with_baseline(&line3, Point::new(4, 42), style, Baseline::Top)
+            let bars = if snapshot.rssi_db > -50 {
+                4
+            } else if snapshot.rssi_db > -60 {
+                3
+            } else if snapshot.rssi_db > -70 {
+                2
+            } else {
+                1
+            };
+
+            // Bars area: x=14.., y=55..63
+            for i in 0..bars {
+                let x = 14 + i * 4;
+                let h = 2 + i * 2;
+                let y = 63 - h;
+                let _ = Rectangle::new(Point::new(x, y), Size::new(2, h as u32))
+                    .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+                    .draw(&mut self.display);
+            }
+
+            // Timer badge (right aligned-ish).
+            if snapshot.timer_enabled {
+                let mut timer = heapless::String::<16>::new();
+                let _ = core::fmt::write(
+                    &mut timer,
+                    format_args!("TIMER {:02}:{:02}", snapshot.timer_hour, snapshot.timer_minutes),
+                );
+                // Rough right-align using fixed font width.
+                let x = (WIDTH - (timer.as_bytes().len() as i32) * (FONT_6X10.character_size.width as i32) - 2)
+                    .max(DIVIDER_X + 2);
+                let _ = Text::with_baseline(&timer, Point::new(x, 56), style_small, Baseline::Top)
+                    .draw(&mut self.display);
+            }
+        }
+
+        // "Saving" indicator (small circle near the top-left).
+        // In the Arduino firmware this is shown during /api/update to indicate settings persistence.
+        if self.saving_frames > 0 {
+            let color = if notification.is_some() {
+                // Notification banner is "inverted" (white background), so draw the icon in "off".
+                BinaryColor::Off
+            } else {
+                BinaryColor::On
+            };
+            let _ = Circle::new(Point::new(2, 2), 4)
+                .into_styled(PrimitiveStyle::with_stroke(color, 1))
                 .draw(&mut self.display);
+            self.saving_frames = self.saving_frames.saturating_sub(1);
         }
 
         let _ = self.display.flush();
@@ -187,6 +322,11 @@ where
 
     fn notify(&mut self, message: &str) {
         self.redraw(Some(message));
+    }
+
+    fn set_saving(&mut self, saving: bool) {
+        // Show for a couple of frames; the controller tick redraws every ~500ms.
+        self.saving_frames = if saving { 2 } else { 0 };
     }
 }
 
@@ -248,6 +388,58 @@ where
     }
 }
 
+/// PWM motor driver for MX1508-style two-PWM H-bridge boards.
+///
+/// This mirrors the optional Arduino build that uses `ESP32MX1508`:
+/// - CW: PWM on A, B off
+/// - CCW: PWM on B, A off
+/// - Stop: both off (coast)
+#[derive(Debug)]
+pub struct MotorPwmDriver<PWMA, PWMB>
+where
+    PWMA: SetDutyCycle,
+    PWMB: SetDutyCycle,
+{
+    pwm_a: PWMA,
+    pwm_b: PWMB,
+    /// 0..=255 scale, to match Arduino expectations.
+    speed: u8,
+}
+
+impl<PWMA, PWMB> MotorPwmDriver<PWMA, PWMB>
+where
+    PWMA: SetDutyCycle,
+    PWMB: SetDutyCycle,
+{
+    /// Create a new PWM motor driver.
+    pub fn new(pwm_a: PWMA, pwm_b: PWMB, speed: u8) -> Self {
+        Self { pwm_a, pwm_b, speed }
+    }
+
+    fn set_outputs(&mut self, duty_a: u8, duty_b: u8) {
+        let _ = self.pwm_a.set_duty_cycle_fraction(duty_a as u16, 255);
+        let _ = self.pwm_b.set_duty_cycle_fraction(duty_b as u16, 255);
+    }
+}
+
+impl<PWMA, PWMB> MotorControl for MotorPwmDriver<PWMA, PWMB>
+where
+    PWMA: SetDutyCycle,
+    PWMB: SetDutyCycle,
+{
+    fn start(&mut self, direction: MotorDirection) {
+        match direction {
+            MotorDirection::Clockwise => self.set_outputs(self.speed, 0),
+            MotorDirection::CounterClockwise => self.set_outputs(0, self.speed),
+        }
+    }
+
+    fn stop(&mut self) {
+        let _ = self.pwm_a.set_duty_cycle_fully_off();
+        let _ = self.pwm_b.set_duty_cycle_fully_off();
+    }
+}
+
 /// PWM LED driver that can render the same patterns as the Arduino firmware.
 #[derive(Debug)]
 pub struct LedPwmDriver<PWM>
@@ -288,6 +480,9 @@ where
 {
     fn apply_pattern<D: DelayNs>(&mut self, pattern: LedPattern, delay: &mut D) {
         match pattern {
+            LedPattern::On => {
+                self.set_duty_fraction(255, 255);
+            }
             LedPattern::Off => {
                 let _ = self.pwm.set_duty_cycle_fully_off();
             }
@@ -295,7 +490,8 @@ where
                 self.ramp(delay, 7);
             }
             LedPattern::SlowBlink => {
-                for _ in 0..3 {
+                // Match Arduino behavior (4 slow "breaths").
+                for _ in 0..4 {
                     self.ramp(delay, 7);
                     delay.delay_ms(150);
                 }
@@ -359,7 +555,11 @@ where
             ControllerEvent::DisplayDynamic => self.display.draw_dynamic(),
             ControllerEvent::DisplayNotification(message) => self.display.notify(message.as_str()),
             ControllerEvent::Led(pattern) => self.led.apply_pattern(pattern, &mut self.delay),
-            ControllerEvent::PersistSettings(snapshot) => self.system.persist_settings(&snapshot),
+            ControllerEvent::PersistSettings(snapshot) => {
+                // Best-effort "saving" indicator on supported displays.
+                self.display.set_saving(true);
+                self.system.persist_settings(&snapshot);
+            }
             ControllerEvent::SyncTime => self.system.sync_time(),
             ControllerEvent::RestartDevice => self.system.restart(),
         }

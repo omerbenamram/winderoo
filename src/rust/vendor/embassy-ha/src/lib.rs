@@ -141,6 +141,12 @@ pub use entity_number::*;
 mod entity_sensor;
 pub use entity_sensor::*;
 
+mod entity_text_sensor;
+pub use entity_text_sensor::*;
+
+mod entity_select;
+pub use entity_select::*;
+
 mod entity_switch;
 pub use entity_switch::*;
 
@@ -236,6 +242,9 @@ struct EntityDiscovery<'a> {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     suggested_display_precision: Option<u8>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    options: Option<&'a [&'a str]>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     availability_topic: Option<&'a str>,
@@ -339,7 +348,9 @@ pub struct DeviceResources {
 }
 
 impl DeviceResources {
-    const ENTITY_LIMIT: usize = 16;
+    // 16 is too small for moderately complex devices (e.g. Winderoo parity with ArduinoHA).
+    // Keep this a simple constant for now to avoid API churn (const generics) for consumers.
+    const ENTITY_LIMIT: usize = 32;
 }
 
 impl Default for DeviceResources {
@@ -433,6 +444,39 @@ pub(crate) struct NumberStorage {
     pub command_policy: CommandPolicy,
 }
 
+#[derive(Debug)]
+pub(crate) struct SelectState {
+    pub index: u8,
+    #[allow(unused)]
+    pub timestamp: embassy_time::Instant,
+}
+
+#[derive(Debug)]
+pub(crate) struct SelectCommand {
+    pub index: u8,
+    #[allow(unused)]
+    pub timestamp: embassy_time::Instant,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct SelectStorage {
+    pub state: Option<SelectState>,
+    pub command: Option<SelectCommand>,
+    pub command_policy: CommandPolicy,
+}
+
+#[derive(Debug)]
+pub(crate) struct TextSensorState {
+    pub value: String<64>,
+    #[allow(unused)]
+    pub timestamp: embassy_time::Instant,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct TextSensorStorage {
+    pub state: Option<TextSensorState>,
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct DeviceTrackerState {
     pub latitude: f32,
@@ -453,6 +497,8 @@ pub(crate) enum EntityStorage {
     BinarySensor(BinarySensorStorage),
     NumericSensor(NumericSensorStorage),
     Number(NumberStorage),
+    Select(SelectStorage),
+    TextSensor(TextSensorStorage),
     DeviceTracker(DeviceTrackerStorage),
 }
 
@@ -489,6 +535,20 @@ impl EntityStorage {
         match self {
             EntityStorage::Number(storage) => storage,
             _ => panic!("expected storage type to be number"),
+        }
+    }
+
+    pub fn as_select_mut(&mut self) -> &mut SelectStorage {
+        match self {
+            EntityStorage::Select(storage) => storage,
+            _ => panic!("expected storage type to be select"),
+        }
+    }
+
+    pub fn as_text_sensor_mut(&mut self) -> &mut TextSensorStorage {
+        match self {
+            EntityStorage::TextSensor(storage) => storage,
+            _ => panic!("expected storage type to be text sensor"),
         }
     }
 
@@ -640,6 +700,25 @@ pub fn create_sensor<'a>(
     Sensor::new(entity)
 }
 
+pub fn create_text_sensor<'a>(
+    device: &Device<'a>,
+    id: &'static str,
+    config: TextSensorConfig,
+) -> TextSensor<'a> {
+    let mut entity_config = EntityConfig {
+        id,
+        ..Default::default()
+    };
+    config.populate(&mut entity_config);
+
+    let entity = create_entity(
+        device,
+        entity_config,
+        EntityStorage::TextSensor(Default::default()),
+    );
+    TextSensor::new(entity)
+}
+
 pub fn create_button<'a>(
     device: &Device<'a>,
     id: &'static str,
@@ -679,6 +758,28 @@ pub fn create_number<'a>(
         }),
     );
     Number::new(entity)
+}
+
+pub fn create_select<'a>(
+    device: &Device<'a>,
+    id: &'static str,
+    config: SelectConfig,
+) -> Select<'a> {
+    let mut entity_config = EntityConfig {
+        id,
+        ..Default::default()
+    };
+    config.populate(&mut entity_config);
+
+    let entity = create_entity(
+        device,
+        entity_config,
+        EntityStorage::Select(SelectStorage {
+            command_policy: config.command_policy,
+            ..Default::default()
+        }),
+    );
+    Select::new(entity)
 }
 
 pub fn create_switch<'a>(
@@ -904,6 +1005,7 @@ pub async fn run<T: Transport>(device: &mut Device<'_>, transport: &mut T) -> Re
                 step: entity_config.step,
                 mode: entity_config.mode,
                 suggested_display_precision: entity_config.suggested_display_precision,
+                options: entity_config.options.map(|opts| opts as &[&str]),
                 availability_topic: Some(availability_topic),
                 payload_available: Some(AVAILABLE_PAYLOAD),
                 payload_not_available: Some(NOT_AVAILABLE_PAYLOAD),
@@ -1038,6 +1140,41 @@ pub async fn run<T: Transport>(device: &mut Device<'_>, transport: &mut T) -> Re
                         ..
                     }) => write!(device.publish_buffer, "{}", value)
                         .expect("publish buffer too small for number state payload"),
+                    EntityStorage::TextSensor(TextSensorStorage {
+                        state: Some(TextSensorState { value, .. }),
+                        ..
+                    }) => device
+                        .publish_buffer
+                        .extend_from_slice(value.as_bytes())
+                        .expect("publish buffer too small for text sensor state payload"),
+                    EntityStorage::Select(SelectStorage {
+                        state: Some(SelectState { index, .. }),
+                        ..
+                    }) => {
+                        let Some(options) = entity.config.options else {
+                            if !first_iteration_push {
+                                crate::log::warn!(
+                                    "select '{}' requested publish but has no options configured",
+                                    entity.config.id
+                                );
+                            }
+                            continue;
+                        };
+                        let Some(option) = options.get((*index) as usize) else {
+                            if !first_iteration_push {
+                                crate::log::warn!(
+                                    "select '{}' requested publish with invalid index {}",
+                                    entity.config.id,
+                                    index
+                                );
+                            }
+                            continue;
+                        };
+                        device
+                            .publish_buffer
+                            .extend_from_slice(option.as_bytes())
+                            .expect("publish buffer too small for select state payload");
+                    }
                     EntityStorage::DeviceTracker(DeviceTrackerStorage {
                         state: Some(tracker_state),
                     }) => {
@@ -1047,7 +1184,7 @@ pub async fn run<T: Transport>(device: &mut Device<'_>, transport: &mut T) -> Re
                             .resize(device.publish_buffer.capacity(), 0)
                             .expect("resize to capacity should never fail");
                         let n =
-                            serde_json_core::to_slice(&tracker_state, &mut device.publish_buffer)
+                            serde_json_core::to_slice(&tracker_state, device.publish_buffer)
                                 .expect("publish buffer too small for tracker state payload");
                         device.publish_buffer.truncate(n);
                     }
@@ -1268,6 +1405,31 @@ pub async fn run<T: Transport>(device: &mut Device<'_>, transport: &mut T) -> Re
                     value: command,
                     timestamp,
                 });
+            }
+            EntityStorage::Select(select_storage) => {
+                let Some(options) = data.config.options else {
+                    crate::log::warn!(
+                        "select '{}' received command '{}' but has no options configured, ignoring it",
+                        data.config.id,
+                        command
+                    );
+                    continue;
+                };
+                let Some(index) = options.iter().position(|opt| *opt == command) else {
+                    crate::log::warn!(
+                        "select '{}' received invalid command '{}', ignoring it",
+                        data.config.id,
+                        command
+                    );
+                    continue;
+                };
+                let timestamp = embassy_time::Instant::now();
+                let index = index as u8;
+                if select_storage.command_policy == CommandPolicy::PublishState {
+                    data.publish = true;
+                    select_storage.state = Some(SelectState { index, timestamp });
+                }
+                select_storage.command = Some(SelectCommand { index, timestamp });
             }
             _ => continue 'outer_loop,
         }

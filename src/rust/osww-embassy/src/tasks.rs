@@ -4,9 +4,13 @@
 //! emitted `ControllerEvent`s using an `EventDispatcher`. The loop itself is
 //! fully deterministic aside from the `RandomSource` supplied to the controller.
 
+use alloc::vec;
+
 #[cfg(feature = "embedded")]
 use embassy_time::{Duration, Ticker, Timer};
 
+use winderoo_firmware::controller::ControllerEvent;
+use winderoo_firmware::hardware::LedPattern;
 #[cfg(feature = "embedded")]
 use winderoo_firmware::controller::Controller;
 #[cfg(feature = "embedded")]
@@ -116,8 +120,23 @@ pub enum RuntimeCommand {
     ApplyTimer(bool),
     /// Apply a full update payload.
     ApplyUpdate(UpdateRequest),
+    /// Wi‑Fi provisioning succeeded (new credentials connected).
+    ///
+    /// Mirrors the Arduino WiFiManager flow: show success indication and reboot.
+    ProvisioningSuccess,
     /// Trigger a device reset.
     Reset,
+}
+
+/// Events emitted when Wi‑Fi provisioning succeeds.
+///
+/// Kept as a helper so we can unit test the exact UX bundle on the host.
+pub fn provisioning_success_events() -> alloc::vec::Vec<ControllerEvent> {
+    vec![
+        ControllerEvent::DisplayNotification(alloc::string::String::from("Connected to WiFi")),
+        ControllerEvent::Led(LedPattern::SlowBlink),
+        ControllerEvent::RestartDevice,
+    ]
 }
 
 /// Channel type for runtime commands.
@@ -145,6 +164,7 @@ where
     time_source: C,
     status_cache: &'a StatusCache,
     wifi_status: &'a WifiStatus,
+    last_wifi_connected: bool,
     commands: embassy_sync::channel::Receiver<
         'a,
         embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
@@ -188,6 +208,8 @@ where
             time_source,
             status_cache,
             wifi_status,
+            // Force one initial refresh on first tick.
+            last_wifi_connected: !wifi_status.is_connected(),
             commands,
             api_version,
             tick_interval,
@@ -203,6 +225,24 @@ where
         self.status_cache.update(snapshot);
     }
 
+    fn refresh_wifi_led(&mut self) {
+        // Match Arduino behavior: LED is a coarse Wi‑Fi provisioning indicator.
+        // Keep it simple + non-blocking: steady on when not connected, off when connected.
+        let connected = self.wifi_status.is_connected();
+        if connected == self.last_wifi_connected {
+            return;
+        }
+        self.last_wifi_connected = connected;
+
+        let pattern = if connected {
+            LedPattern::Off
+        } else {
+            LedPattern::On
+        };
+        self.dispatcher
+            .handle_event(winderoo_firmware::controller::ControllerEvent::Led(pattern));
+    }
+
     async fn dispatch_events(
         &mut self,
         mut events: alloc::vec::Vec<winderoo_firmware::controller::ControllerEvent>,
@@ -210,7 +250,9 @@ where
         use embassy_futures::select::{select, Either};
 
         loop {
-            let mut interrupted: Option<alloc::vec::Vec<winderoo_firmware::controller::ControllerEvent>> = None;
+            let mut interrupted: Option<
+                alloc::vec::Vec<winderoo_firmware::controller::ControllerEvent>,
+            > = None;
 
             for event in events.into_iter() {
                 match event {
@@ -227,13 +269,16 @@ where
                             Either::Second(command) => {
                                 let now_epoch = self.time_source.now_epoch();
                                 let events = match command {
-                                    RuntimeCommand::ApplyPower(enabled) => self.controller.apply_power(enabled),
+                                    RuntimeCommand::ApplyPower(enabled) => {
+                                        self.controller.apply_power(enabled)
+                                    }
                                     RuntimeCommand::ApplyTimer(enabled) => {
                                         self.controller.apply_timer_enabled(enabled)
                                     }
                                     RuntimeCommand::ApplyUpdate(update) => {
                                         self.controller.apply_update(update, now_epoch)
                                     }
+                                    RuntimeCommand::ProvisioningSuccess => provisioning_success_events(),
                                     RuntimeCommand::Reset => self.controller.request_reset(),
                                 };
                                 interrupted = Some(events);
@@ -270,6 +315,7 @@ where
                     self.dispatch_events(events).await;
                     let now_epoch = self.time_source.now_epoch();
                     self.update_status_cache(now_epoch);
+                    self.refresh_wifi_led();
                 }
                 Either::Second(command) => {
                     let now_epoch = self.time_source.now_epoch();
@@ -286,6 +332,9 @@ where
                             let events = self.controller.apply_update(update, now_epoch);
                             self.dispatch_events(events).await;
                         }
+                        RuntimeCommand::ProvisioningSuccess => {
+                            self.dispatch_events(provisioning_success_events()).await;
+                        }
                         RuntimeCommand::Reset => {
                             let events = self.controller.request_reset();
                             self.dispatch_events(events).await;
@@ -293,8 +342,26 @@ where
                     }
                     let now_epoch = self.time_source.now_epoch();
                     self.update_status_cache(now_epoch);
+                    self.refresh_wifi_led();
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod provisioning_tests {
+    use super::*;
+
+    #[test]
+    fn provisioning_success_bundle_matches_expected_shape() {
+        let events = provisioning_success_events();
+        let mut expected = alloc::vec::Vec::new();
+        expected.push(ControllerEvent::DisplayNotification(alloc::string::String::from(
+            "Connected to WiFi",
+        )));
+        expected.push(ControllerEvent::Led(LedPattern::SlowBlink));
+        expected.push(ControllerEvent::RestartDevice);
+        assert_eq!(events, expected);
     }
 }

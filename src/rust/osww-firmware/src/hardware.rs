@@ -36,6 +36,8 @@ impl RandomSource for XorShift32 {
 /// LED patterns supported by the firmware state machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LedPattern {
+    /// Turn the LED fully on.
+    On,
     /// Turn the LED off.
     Off,
     /// Slow blink pattern (success).

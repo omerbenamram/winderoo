@@ -42,10 +42,16 @@ default = ["mdns"]
 mdns = ["dep:edge-mdns", "dep:edge-nal", "dep:edge-nal-embassy"]
 oled = ["winderoo-embassy/oled"]
 home-assistant = ["dep:embassy-ha"]
+pwm-motor = []
 
 # Work around an LLVM Xtensa codegen crash in `domain` at -O3.
 [profile.release.package.domain]
 opt-level = 1
+
+# rust-analyzer (and `cargo check`) uses the dev profile by default.
+# `esp-storage` refuses to build with opt-level 0, so bump it for dev-only checks.
+[profile.dev.package.esp-storage]
+opt-level = 2
 
 [patch.crates-io]
 embassy-ha = { path = "../vendor/embassy-ha" }

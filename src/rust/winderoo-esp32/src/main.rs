@@ -1,5 +1,6 @@
 #![no_std]
 #![no_main]
+#![recursion_limit = "256"]
 
 extern crate alloc;
 
@@ -14,35 +15,39 @@ use embassy_sync::blocking_mutex::Mutex;
 use embassy_time::Duration;
 use embedded_storage::nor_flash::ReadNorFlash;
 use esp_hal::clock::CpuClock;
-use esp_hal::gpio::{Level, Output, OutputConfig};
+use esp_hal::delay::Delay;
+use esp_hal::gpio::{DriveMode, Level, Output, OutputConfig};
+use esp_hal::gpio::{Input, InputConfig, Pull};
 #[cfg(feature = "oled")]
 use esp_hal::i2c::master::{Config as I2cConfig, I2c};
-use esp_hal::gpio::{Input, InputConfig, Pull};
-use esp_hal::timer::timg::TimerGroup;
-#[cfg(feature = "oled")]
+use esp_hal::ledc::channel::ChannelIFace;
+use esp_hal::ledc::timer::TimerIFace;
+use esp_hal::ledc::{channel, timer, LSGlobalClkSource, Ledc, LowSpeed};
 use esp_hal::time::Rate;
-use esp_hal::delay::Delay;
+use esp_hal::timer::timg::TimerGroup;
 use esp_hal::{rng::Rng, Config as HalConfig};
 use esp_println::logger::init_logger;
 use log::info;
 
 use esp_storage::FlashStorage;
 
-use winderoo_embassy::hardware::{EventDispatcher, MotorDriver};
+use winderoo_embassy::hardware::{EventDispatcher, LedPwmDriver, MotorDriver, MotorPwmDriver};
 use winderoo_embassy::state::{StatusCache, SystemSignals, WifiStatus};
-use winderoo_embassy::system::{load_runtime_state, NorFlashSettingsStore, ResetControl, SignalSystemHooks};
+use winderoo_embassy::system::{load_runtime_state, NorFlashSettingsStore, SignalSystemHooks};
 use winderoo_embassy::tasks::{ControllerTask, RuntimeCommandChannel};
 use winderoo_embassy::time::{RtcClock, RtcTimeSource};
-use winderoo_embassy::wifi::{ProvisioningConfig, WifiCommandChannel, WifiCommandSender, WifiManager};
+use winderoo_embassy::wifi::{
+    ProvisioningConfig, WifiCommandChannel, WifiCommandSender, WifiManager,
+};
 
 use winderoo_firmware::controller::Controller;
 use winderoo_firmware::hardware::{LedPattern, XorShift32};
 
 use crate::storage::{FlashPartition, NorFlashWifiCredentialStore, SharedFlash};
 
-mod storage;
 #[cfg(feature = "home-assistant")]
 mod home_assistant;
+mod storage;
 
 // If you are okay with using a nightly compiler, you can use `static_cell::make_static!`.
 macro_rules! mk_static {
@@ -84,8 +89,10 @@ const HOME_ASSISTANT_BROKER: &str = match option_env!("WINDEROO_HA_BROKER") {
 };
 
 /// SNTP server to query (UTC).
-const NTP_SERVER: embassy_net::IpEndpoint =
-    embassy_net::IpEndpoint::new(embassy_net::IpAddress::Ipv4(embassy_net::Ipv4Address::new(129, 6, 15, 28)), 123);
+const NTP_SERVER: embassy_net::IpEndpoint = embassy_net::IpEndpoint::new(
+    embassy_net::IpAddress::Ipv4(embassy_net::Ipv4Address::new(129, 6, 15, 28)),
+    123,
+);
 
 /// Shared epoch store for the software RTC (seconds).
 static RTC_EPOCH: Mutex<CriticalSectionRawMutex, RefCell<u64>> = Mutex::new(RefCell::new(0));
@@ -99,6 +106,14 @@ static WIFI_COMMANDS: WifiCommandChannel<WIFI_QUEUE_DEPTH> = WifiCommandChannel:
 type DisplayDriver = winderoo_embassy::hardware::Ssd1306Display<I2c<'static, esp_hal::Blocking>>;
 #[cfg(not(feature = "oled"))]
 type DisplayDriver = winderoo_embassy::hardware::NoopDisplay;
+
+#[cfg(feature = "pwm-motor")]
+type MotorImpl = MotorPwmDriver<
+    esp_hal::ledc::channel::Channel<'static, LowSpeed>,
+    esp_hal::ledc::channel::Channel<'static, LowSpeed>,
+>;
+#[cfg(not(feature = "pwm-motor"))]
+type MotorImpl = MotorDriver<Output<'static>, Output<'static>>;
 
 #[derive(Debug, Clone, Copy)]
 struct SharedRtc {
@@ -120,27 +135,6 @@ impl RtcClock for SharedRtc {
         self.epoch.lock(|cell| {
             *cell.borrow_mut() = epoch;
         })
-    }
-}
-
-#[derive(Debug)]
-struct ResetWithWifiClear<C> {
-    creds: C,
-}
-
-impl<C> ResetWithWifiClear<C> {
-    fn new(creds: C) -> Self {
-        Self { creds }
-    }
-}
-
-impl<C> ResetControl for ResetWithWifiClear<C>
-where
-    C: winderoo_embassy::wifi::CredentialStore,
-{
-    fn reset(&mut self) {
-        self.creds.clear();
-        esp_hal::system::software_reset();
     }
 }
 
@@ -170,8 +164,13 @@ impl<PIN> winderoo_embassy::hardware::LedControl for LedGpioDriver<PIN>
 where
     PIN: embedded_hal::digital::OutputPin,
 {
-    fn apply_pattern<D: embedded_hal::delay::DelayNs>(&mut self, pattern: LedPattern, delay: &mut D) {
+    fn apply_pattern<D: embedded_hal::delay::DelayNs>(
+        &mut self,
+        pattern: LedPattern,
+        delay: &mut D,
+    ) {
         match pattern {
+            LedPattern::On => self.set_on(),
             LedPattern::Off => self.set_off(),
             LedPattern::Pulse => {
                 // Minimal pulse indicator. (Future: PWM ramp.)
@@ -200,7 +199,9 @@ where
 }
 
 #[embassy_executor::task(pool_size = 2)]
-async fn net_task(mut runner: embassy_net::Runner<'static, esp_radio::wifi::WifiDevice<'static>>) -> ! {
+async fn net_task(
+    mut runner: embassy_net::Runner<'static, esp_radio::wifi::WifiDevice<'static>>,
+) -> ! {
     runner.run().await
 }
 
@@ -221,8 +222,8 @@ async fn controller_task(
     task: ControllerTask<
         'static,
         XorShift32,
-        MotorDriver<Output<'static>, Output<'static>>,
-        LedGpioDriver<Output<'static>>,
+        MotorImpl,
+        LedPwmDriver<esp_hal::ledc::channel::Channel<'static, LowSpeed>>,
         DisplayDriver,
         SignalSystemHooks<'static>,
         Delay,
@@ -240,7 +241,7 @@ async fn system_task(
         NorFlashSettingsStore<FlashPartition<'static>>,
         SharedRtc,
         winderoo_embassy::sntp::UdpSntpClient<'static, 128, 128>,
-        ResetWithWifiClear<NorFlashWifiCredentialStore<FlashPartition<'static>>>,
+        winderoo_embassy::esp32::EspReset,
     >,
 ) -> ! {
     task.run().await
@@ -252,13 +253,16 @@ async fn dhcp_server_task(stack: embassy_net::Stack<'static>) -> ! {
     use esp_hal_dhcp_server::simple_leaser::SimpleDhcpLeaser;
     use esp_hal_dhcp_server::structs::DhcpServerConfig;
 
+    const AP_DNS: [core::net::Ipv4Addr; 1] = [core::net::Ipv4Addr::new(192, 168, 4, 1)];
+
     let config = DhcpServerConfig {
         ip: core::net::Ipv4Addr::new(192, 168, 4, 1),
         lease_time: Duration::from_secs(3600),
         gateways: &[],
         subnet: None,
-        dns: &[],
-        use_captive_portal: false,
+        // Point clients at the AP's captive portal DNS.
+        dns: &AP_DNS,
+        use_captive_portal: true,
     };
 
     let mut leaser = SimpleDhcpLeaser {
@@ -276,16 +280,56 @@ async fn dhcp_server_task(stack: embassy_net::Stack<'static>) -> ! {
     }
 }
 
+/// Wildcard DNS responder for captive portal behavior on the provisioning AP.
+///
+/// Responds to most DNS queries with `192.168.4.1`, so arbitrary hostnames resolve to the device.
+#[embassy_executor::task]
+async fn dns_captive_task(stack: embassy_net::Stack<'static>) -> ! {
+    use embassy_net::udp::{PacketMetadata, UdpSocket};
+
+    const DNS_PORT: u16 = 53;
+    const AP_IP: [u8; 4] = [192, 168, 4, 1];
+
+    let mut rx_meta = [PacketMetadata::EMPTY; 2];
+    let mut tx_meta = [PacketMetadata::EMPTY; 2];
+    let mut sock_rx = [0u8; 512];
+    let mut sock_tx = [0u8; 512];
+    let mut query = [0u8; 512];
+    let mut response = [0u8; 512];
+
+    let mut socket = UdpSocket::new(
+        stack,
+        &mut rx_meta,
+        &mut sock_rx,
+        &mut tx_meta,
+        &mut sock_tx,
+    );
+    socket.bind(DNS_PORT).expect("DNS bind failed");
+
+    loop {
+        let (n, remote) = match socket.recv_from(&mut query).await {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        if let Some(resp_len) =
+            winderoo_embassy::captive_portal::build_dns_wildcard_response(&query[..n], &mut response, AP_IP)
+        {
+            let _ = socket.send_to(&response[..resp_len], remote).await;
+        }
+    }
+}
+
 #[cfg(feature = "mdns")]
 #[embassy_executor::task]
 async fn mdns_task(stack: embassy_net::Stack<'static>) -> ! {
     use core::net::{Ipv4Addr, Ipv6Addr};
 
-    use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-    use embassy_sync::signal::Signal;
     use edge_mdns::host::{Host, Service, ServiceAnswers};
     use edge_mdns::io::{bind, Mdns, IPV4_DEFAULT_SOCKET};
     use edge_mdns::HostAnswersMdnsHandler;
+    use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+    use embassy_sync::signal::Signal;
 
     use embassy_time::Timer;
 
@@ -296,7 +340,8 @@ async fn mdns_task(stack: embassy_net::Stack<'static>) -> ! {
         edge_mdns::buf::VecBufAccess::new();
     let send_buf: edge_mdns::buf::VecBufAccess<CriticalSectionRawMutex, 1024> =
         edge_mdns::buf::VecBufAccess::new();
-    let udp_buffers: edge_nal_embassy::UdpBuffers<1, 1024, 1024, 2> = edge_nal_embassy::UdpBuffers::new();
+    let udp_buffers: edge_nal_embassy::UdpBuffers<1, 1024, 1024, 2> =
+        edge_nal_embassy::UdpBuffers::new();
     let udp = edge_nal_embassy::Udp::new(stack, &udp_buffers);
 
     loop {
@@ -307,14 +352,15 @@ async fn mdns_task(stack: embassy_net::Stack<'static>) -> ! {
             .map(|config| config.address.address())
             .unwrap_or(Ipv4Addr::UNSPECIFIED);
 
-        let mut socket = match bind(&udp, IPV4_DEFAULT_SOCKET, Some(Ipv4Addr::UNSPECIFIED), None).await {
-            Ok(socket) => socket,
-            Err(err) => {
-                log::warn!("mDNS bind failed: {:?}", err.erase());
-                Timer::after(Duration::from_secs(5)).await;
-                continue;
-            }
-        };
+        let mut socket =
+            match bind(&udp, IPV4_DEFAULT_SOCKET, Some(Ipv4Addr::UNSPECIFIED), None).await {
+                Ok(socket) => socket,
+                Err(err) => {
+                    log::warn!("mDNS bind failed: {:?}", err.erase());
+                    Timer::after(Duration::from_secs(5)).await;
+                    continue;
+                }
+            };
 
         let (recv, send) = socket.split();
 
@@ -369,8 +415,9 @@ async fn http_server_task(
 ) -> ! {
     use picoserve::{Config, NoGracefulShutdown, Server, Timeouts};
 
-    let api_state = winderoo_embassy::http::ApiState::new(status_cache, runtime_sender, Some(wifi_sender));
-    let router = winderoo_embassy::http::build_router(api_state);
+    let api_state =
+        winderoo_embassy::http::ApiState::new(status_cache, runtime_sender, Some(wifi_sender));
+    let router = winderoo_embassy::http::build_router(api_state, name == "http-ap");
 
     let config = Config::new(Timeouts {
         start_read_request: Some(Duration::from_secs(10)),
@@ -385,7 +432,13 @@ async fn http_server_task(
     let mut tcp_tx_buffer = [0u8; 2048];
 
     let shutdown: NoGracefulShutdown = Server::new(&router, &config, &mut http_buffer)
-        .listen_and_serve(name, stack, HTTP_PORT, &mut tcp_rx_buffer, &mut tcp_tx_buffer)
+        .listen_and_serve(
+            name,
+            stack,
+            HTTP_PORT,
+            &mut tcp_rx_buffer,
+            &mut tcp_tx_buffer,
+        )
         .await;
 
     shutdown.into_never()
@@ -394,6 +447,7 @@ async fn http_server_task(
 #[embassy_executor::task]
 async fn external_button_task(
     mut button: Input<'static>,
+    status_cache: &'static StatusCache,
     runtime_sender: embassy_sync::channel::Sender<
         'static,
         embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
@@ -407,7 +461,10 @@ async fn external_button_task(
     loop {
         // Rising edge = pressed (assuming pull-down).
         let _ = button.wait_for_rising_edge().await;
-        let _ = runtime_sender.send(RuntimeCommand::ApplyPower(false)).await;
+        let enabled = status_cache.snapshot().winder_enabled;
+        let _ = runtime_sender
+            .send(RuntimeCommand::ApplyPower(!enabled))
+            .await;
 
         // Debounce.
         Timer::after(Duration::from_millis(250)).await;
@@ -451,7 +508,10 @@ async fn main(spawner: Spawner) -> ! {
     let (sta_stack, sta_runner) = embassy_net::new(
         interfaces.sta,
         sta_config,
-        mk_static!(embassy_net::StackResources<8>, embassy_net::StackResources::<8>::new()),
+        mk_static!(
+            embassy_net::StackResources<8>,
+            embassy_net::StackResources::<8>::new()
+        ),
         net_seed,
     );
 
@@ -464,13 +524,17 @@ async fn main(spawner: Spawner) -> ! {
     let (ap_stack, ap_runner) = embassy_net::new(
         interfaces.ap,
         ap_config,
-        mk_static!(embassy_net::StackResources<8>, embassy_net::StackResources::<8>::new()),
+        mk_static!(
+            embassy_net::StackResources<8>,
+            embassy_net::StackResources::<8>::new()
+        ),
         net_seed_ap,
     );
 
     spawner.spawn(net_task(sta_runner)).ok();
     spawner.spawn(net_task(ap_runner)).ok();
     spawner.spawn(dhcp_server_task(ap_stack)).ok();
+    spawner.spawn(dns_captive_task(ap_stack)).ok();
     #[cfg(feature = "mdns")]
     spawner.spawn(mdns_task(sta_stack)).ok();
 
@@ -484,9 +548,7 @@ async fn main(spawner: Spawner) -> ! {
         mk_static!(SharedFlash, Mutex::new(RefCell::new(flash)));
 
     let flash_capacity = shared_flash.lock(|cell| ReadNorFlash::capacity(&*cell.borrow()));
-    let storage_base = flash_capacity
-        .checked_sub(STORAGE_TOTAL_BYTES)
-        .unwrap_or(0) as u32;
+    let storage_base = flash_capacity.checked_sub(STORAGE_TOTAL_BYTES).unwrap_or(0) as u32;
 
     // Flash partitions for settings + Wi-Fi credentials.
     let settings_part = FlashPartition::new(shared_flash, storage_base, SETTINGS_BYTES as u32);
@@ -499,9 +561,8 @@ async fn main(spawner: Spawner) -> ! {
     // Settings store.
     let mut settings_store = NorFlashSettingsStore::new(settings_part, 0, SETTINGS_BYTES);
 
-    // Wi-Fi credential store (duplicated: one instance for wifi manager, one for reset path).
+    // Wi-Fi credential store.
     let wifi_store = NorFlashWifiCredentialStore::new(wifi_part, 0, WIFI_BYTES);
-    let reset_wifi_store = NorFlashWifiCredentialStore::new(wifi_part, 0, WIFI_BYTES);
 
     // Shared state blocks.
     let rtc = SharedRtc::new(&RTC_EPOCH);
@@ -510,17 +571,70 @@ async fn main(spawner: Spawner) -> ! {
     let controller = Controller::new(runtime_state, rng);
 
     let initial_snapshot = controller.status_snapshot(0, -100, "4.0.1");
-    let status_cache: &'static StatusCache = &*mk_static!(StatusCache, StatusCache::new(initial_snapshot));
+    let status_cache: &'static StatusCache =
+        &*mk_static!(StatusCache, StatusCache::new(initial_snapshot));
     let wifi_status: &'static WifiStatus = &*mk_static!(WifiStatus, WifiStatus::new());
     let signals: &'static SystemSignals = &*mk_static!(SystemSignals, SystemSignals::new());
 
-    // Hardware (GPIO) - mirror Arduino defaults.
-    let motor_a = Output::new(peripherals.GPIO25, Level::Low, OutputConfig::default());
-    let motor_b = Output::new(peripherals.GPIO26, Level::Low, OutputConfig::default());
-    let motor = MotorDriver::new(motor_a, motor_b);
+    // Hardware - mirror Arduino defaults.
+    //
+    // LEDC PWM is used for the status LED, and optionally for MX1508-style PWM motor boards.
+    let mut ledc = Ledc::new(peripherals.LEDC);
+    ledc.set_global_slow_clock(LSGlobalClkSource::APBClk);
 
-    let led_pin = Output::new(peripherals.GPIO0, Level::Low, OutputConfig::default());
-    let led = LedGpioDriver::new(led_pin);
+    let mut pwm_timer = ledc.timer::<LowSpeed>(timer::Number::Timer0);
+    pwm_timer
+        .configure(timer::config::Config {
+            duty: timer::config::Duty::Duty8Bit,
+            clock_source: timer::LSClockSource::APBClk,
+            frequency: Rate::from_hz(5_000),
+        })
+        .expect("LEDC timer config failed");
+    let pwm_timer: &'static mut esp_hal::ledc::timer::Timer<'static, LowSpeed> =
+        mk_static!(esp_hal::ledc::timer::Timer<'static, LowSpeed>, pwm_timer);
+
+    #[cfg(feature = "pwm-motor")]
+    let motor: MotorImpl = {
+        // Match Arduino's MX1508 default speed (145/255).
+        const MOTOR_SPEED: u8 = 145;
+
+        let mut pwm_a = ledc.channel(channel::Number::Channel1, peripherals.GPIO25);
+        pwm_a
+            .configure(channel::config::Config {
+                timer: &*pwm_timer,
+                duty_pct: 0,
+                drive_mode: DriveMode::PushPull,
+            })
+            .expect("LEDC motor channel A config failed");
+
+        let mut pwm_b = ledc.channel(channel::Number::Channel2, peripherals.GPIO26);
+        pwm_b
+            .configure(channel::config::Config {
+                timer: &*pwm_timer,
+                duty_pct: 0,
+                drive_mode: DriveMode::PushPull,
+            })
+            .expect("LEDC motor channel B config failed");
+
+        MotorPwmDriver::new(pwm_a, pwm_b, MOTOR_SPEED)
+    };
+
+    #[cfg(not(feature = "pwm-motor"))]
+    let motor: MotorImpl = {
+        let motor_a = Output::new(peripherals.GPIO25, Level::Low, OutputConfig::default());
+        let motor_b = Output::new(peripherals.GPIO26, Level::Low, OutputConfig::default());
+        MotorDriver::new(motor_a, motor_b)
+    };
+
+    let mut led_channel = ledc.channel(channel::Number::Channel0, peripherals.GPIO0);
+    led_channel
+        .configure(channel::config::Config {
+            timer: &*pwm_timer,
+            duty_pct: 0,
+            drive_mode: DriveMode::PushPull,
+        })
+        .expect("LEDC channel config failed");
+    let led = LedPwmDriver::new(led_channel);
 
     let button = {
         // Default to pull-down; if your wiring uses pull-up, change to `Pull::Up`
@@ -562,6 +676,9 @@ async fn main(spawner: Spawner) -> ! {
         Duration::from_millis(500),
     );
 
+    // Runtime sender used by HTTP + Wi‑Fi provisioning callbacks.
+    let runtime_sender = RUNTIME_COMMANDS.sender();
+
     // Wi-Fi manager.
     let wifi_control = winderoo_embassy::esp32::EspWifiControl::new(wifi_controller);
     let wifi_manager = WifiManager::new(
@@ -569,15 +686,20 @@ async fn main(spawner: Spawner) -> ! {
         wifi_store,
         wifi_status,
         WIFI_COMMANDS.receiver(),
+        Some(runtime_sender),
         ProvisioningConfig::new("Winderoo Setup", ""),
         10,
     );
 
     // System services.
-    let sntp_rx_meta: &'static mut [embassy_net::udp::PacketMetadata; 1] =
-        mk_static!([embassy_net::udp::PacketMetadata; 1], [embassy_net::udp::PacketMetadata::EMPTY; 1]);
-    let sntp_tx_meta: &'static mut [embassy_net::udp::PacketMetadata; 1] =
-        mk_static!([embassy_net::udp::PacketMetadata; 1], [embassy_net::udp::PacketMetadata::EMPTY; 1]);
+    let sntp_rx_meta: &'static mut [embassy_net::udp::PacketMetadata; 1] = mk_static!(
+        [embassy_net::udp::PacketMetadata; 1],
+        [embassy_net::udp::PacketMetadata::EMPTY; 1]
+    );
+    let sntp_tx_meta: &'static mut [embassy_net::udp::PacketMetadata; 1] = mk_static!(
+        [embassy_net::udp::PacketMetadata; 1],
+        [embassy_net::udp::PacketMetadata::EMPTY; 1]
+    );
     let sntp_rx_buf: &'static mut [u8; 128] = mk_static!([u8; 128], [0u8; 128]);
     let sntp_tx_buf: &'static mut [u8; 128] = mk_static!([u8; 128], [0u8; 128]);
 
@@ -589,7 +711,7 @@ async fn main(spawner: Spawner) -> ! {
         sntp_tx_meta,
         sntp_tx_buf,
     );
-    let reset = ResetWithWifiClear::new(reset_wifi_store);
+    let reset = winderoo_embassy::esp32::EspReset::default();
     let system = winderoo_embassy::system::SystemTask::new(
         settings_store,
         rtc,
@@ -597,14 +719,13 @@ async fn main(spawner: Spawner) -> ! {
         reset,
         status_cache,
         signals,
-        5,
+        1,
     );
 
     // HTTP servers (one per stack). They can share the same state + channels.
-    let runtime_sender = RUNTIME_COMMANDS.sender();
     let wifi_sender = WifiCommandSender::new(WIFI_COMMANDS.sender());
     spawner
-        .spawn(external_button_task(button, runtime_sender))
+        .spawn(external_button_task(button, status_cache, runtime_sender))
         .ok();
     spawner
         .spawn(http_server_task(
@@ -629,12 +750,15 @@ async fn main(spawner: Spawner) -> ! {
     {
         if HOME_ASSISTANT_BROKER != "YOUR_HOME_ASSISTANT_IP" {
             use embassy_ha::{
-                ButtonClass, ButtonConfig, CommandPolicy, DeviceConfig, EntityCommonConfig, NumberConfig,
-                NumberMode, SwitchClass, SwitchConfig,
+                ButtonClass, ButtonConfig, CommandPolicy, DeviceConfig, EntityCommonConfig,
+                NumberConfig, NumberMode, SelectConfig, SensorClass, SensorConfig, StateClass,
+                SwitchClass, SwitchConfig, TextSensorConfig,
             };
 
-            let resources: &'static mut embassy_ha::DeviceResources =
-                mk_static!(embassy_ha::DeviceResources, embassy_ha::DeviceResources::default());
+            let resources: &'static mut embassy_ha::DeviceResources = mk_static!(
+                embassy_ha::DeviceResources,
+                embassy_ha::DeviceResources::default()
+            );
             let device = embassy_ha::new(
                 resources,
                 DeviceConfig {
@@ -645,9 +769,6 @@ async fn main(spawner: Spawner) -> ! {
                 },
             );
 
-            // NOTE: `embassy-ha` has a fixed entity limit (currently 16). We keep the HA surface
-            // area compact by using "minutes since midnight" number entities instead of hour/minute
-            // select entities.
             let power = embassy_ha::create_switch(
                 &device,
                 "power",
@@ -690,7 +811,7 @@ async fn main(spawner: Spawner) -> ! {
 
             let start = embassy_ha::create_button(
                 &device,
-                "start",
+                "startButton",
                 ButtonConfig {
                     common: EntityCommonConfig {
                         name: Some("Start"),
@@ -702,7 +823,7 @@ async fn main(spawner: Spawner) -> ! {
             );
             let stop = embassy_ha::create_button(
                 &device,
-                "stop",
+                "stopButton",
                 ButtonConfig {
                     common: EntityCommonConfig {
                         name: Some("Stop"),
@@ -730,38 +851,83 @@ async fn main(spawner: Spawner) -> ! {
                     ..Default::default()
                 },
             );
-            let direction = embassy_ha::create_number(
+
+            let direction = embassy_ha::create_select(
                 &device,
                 "direction",
-                NumberConfig {
+                SelectConfig {
                     common: EntityCommonConfig {
-                        name: Some("Direction (0=CCW,1=BOTH,2=CW)"),
+                        name: Some("Direction"),
                         icon: Some("mdi:arrow-left-right"),
                         ..Default::default()
                     },
-                    min: Some(0.0),
-                    max: Some(2.0),
-                    step: Some(1.0),
-                    mode: NumberMode::Box,
+                    options: &home_assistant::DIRECTION_OPTIONS,
                     command_policy: CommandPolicy::default(),
+                },
+            );
+
+            let hour = embassy_ha::create_select(
+                &device,
+                "hour",
+                SelectConfig {
+                    common: EntityCommonConfig {
+                        name: Some("Hour"),
+                        icon: Some("mdi:timer-sand-full"),
+                        ..Default::default()
+                    },
+                    options: &home_assistant::HOUR_OPTIONS,
+                    command_policy: CommandPolicy::default(),
+                },
+            );
+            let minutes = embassy_ha::create_select(
+                &device,
+                "minutes",
+                SelectConfig {
+                    common: EntityCommonConfig {
+                        name: Some("Minutes"),
+                        icon: Some("mdi:timer-sand-empty"),
+                        ..Default::default()
+                    },
+                    options: &home_assistant::MINUTE_OPTIONS,
+                    command_policy: CommandPolicy::default(),
+                },
+            );
+
+            let rssi_reception = embassy_ha::create_sensor(
+                &device,
+                "rssiReception",
+                SensorConfig {
+                    common: EntityCommonConfig {
+                        name: Some("WiFi Reception"),
+                        icon: Some("mdi:antenna"),
+                        ..Default::default()
+                    },
+                    class: SensorClass::SignalStrength,
+                    state_class: StateClass::Measurement,
+                    unit: Some(embassy_ha::constants::HA_UNIT_SIGNAL_STRENGTH_DBM),
                     ..Default::default()
                 },
             );
-            let timer_start_minutes = embassy_ha::create_number(
+            let activity = embassy_ha::create_text_sensor(
                 &device,
-                "timerStartMinutes",
-                NumberConfig {
+                "activity",
+                TextSensorConfig {
                     common: EntityCommonConfig {
-                        name: Some("Timer Start (minutes since midnight)"),
-                        icon: Some("mdi:clock-start"),
+                        name: Some("Status"),
+                        icon: Some("mdi:information"),
                         ..Default::default()
                     },
-                    min: Some(0.0),
-                    max: Some(1439.0),
-                    step: Some(1.0),
-                    mode: NumberMode::Box,
-                    command_policy: CommandPolicy::default(),
-                    ..Default::default()
+                },
+            );
+            let current_epoch = embassy_ha::create_text_sensor(
+                &device,
+                "currentEpoch",
+                TextSensorConfig {
+                    common: EntityCommonConfig {
+                        name: Some("RTC Epoch Time"),
+                        icon: Some("mdi:clock-time-nine-outline"),
+                        ..Default::default()
+                    },
                 },
             );
 
@@ -770,13 +936,13 @@ async fn main(spawner: Spawner) -> ! {
                 "customWindDuration",
                 NumberConfig {
                     common: EntityCommonConfig {
-                        name: Some("Custom Wind Duration (s)"),
-                        icon: Some("mdi:timer-outline"),
+                        name: Some("Time to Rotate"),
+                        icon: Some("mdi:play-circle-outline"),
                         ..Default::default()
                     },
-                    min: Some(0.0),
-                    max: Some(3600.0),
-                    step: Some(1.0),
+                    min: Some(100.0),
+                    max: Some(960.0),
+                    step: Some(10.0),
                     mode: NumberMode::Box,
                     command_policy: CommandPolicy::default(),
                     ..Default::default()
@@ -787,13 +953,13 @@ async fn main(spawner: Spawner) -> ! {
                 "customWindPauseDuration",
                 NumberConfig {
                     common: EntityCommonConfig {
-                        name: Some("Custom Wind Pause (s)"),
-                        icon: Some("mdi:timer-sand"),
+                        name: Some("Time to pause"),
+                        icon: Some("mdi:pause-circle-outline"),
                         ..Default::default()
                     },
-                    min: Some(0.0),
-                    max: Some(3600.0),
-                    step: Some(1.0),
+                    min: Some(10.0),
+                    max: Some(900.0),
+                    step: Some(5.0),
                     mode: NumberMode::Box,
                     command_policy: CommandPolicy::default(),
                     ..Default::default()
@@ -801,15 +967,15 @@ async fn main(spawner: Spawner) -> ! {
             );
             let rotation_duration = embassy_ha::create_number(
                 &device,
-                "rotationDurationSecs",
+                "customDurationInSecondsToCompleteOneRevolution",
                 NumberConfig {
                     common: EntityCommonConfig {
-                        name: Some("Rotation Duration (s)"),
-                        icon: Some("mdi:rotate-right"),
+                        name: Some("Duration to complete a single rotation"),
+                        icon: Some("mdi:arrow-u-down-right"),
                         ..Default::default()
                     },
                     min: Some(1.0),
-                    max: Some(60.0),
+                    max: Some(16.0),
                     step: Some(1.0),
                     mode: NumberMode::Box,
                     command_policy: CommandPolicy::default(),
@@ -817,21 +983,17 @@ async fn main(spawner: Spawner) -> ! {
                 },
             );
 
-            let rtc_offset = embassy_ha::create_number(
+            let rtc_offset = embassy_ha::create_select(
                 &device,
                 "rtcGmtOffset",
-                NumberConfig {
+                SelectConfig {
                     common: EntityCommonConfig {
-                        name: Some("UTC Offset (hours)"),
-                        icon: Some("mdi:clock-outline"),
+                        name: Some("UTC Offset"),
+                        icon: Some("mdi:clock-time-eight-outline"),
                         ..Default::default()
                     },
-                    min: Some(-12.0),
-                    max: Some(14.0),
-                    step: Some(0.5),
-                    mode: NumberMode::Box,
+                    options: &home_assistant::UTC_OFFSET_OPTIONS,
                     command_policy: CommandPolicy::default(),
-                    ..Default::default()
                 },
             );
             let rtc_dst = embassy_ha::create_switch(
@@ -840,7 +1002,7 @@ async fn main(spawner: Spawner) -> ! {
                 SwitchConfig {
                     common: EntityCommonConfig {
                         name: Some("DST"),
-                        icon: Some("mdi:weather-sunny"),
+                        icon: Some("mdi:clock-time-four-outline"),
                         ..Default::default()
                     },
                     class: SwitchClass::Switch,
@@ -861,46 +1023,74 @@ async fn main(spawner: Spawner) -> ! {
                     command_policy: CommandPolicy::default(),
                 },
             );
-            let screen_schedule_start_minutes = embassy_ha::create_number(
+
+            let screen_schedule_start_hour = embassy_ha::create_select(
                 &device,
-                "screenScheduleStartMinutes",
-                NumberConfig {
+                "screenScheduleStartHour",
+                SelectConfig {
                     common: EntityCommonConfig {
-                        name: Some("Screen Schedule Start (minutes since midnight)"),
-                        icon: Some("mdi:clock-start"),
+                        name: Some("Screen Schedule Start Hour"),
+                        icon: Some("mdi:clock-outline"),
                         ..Default::default()
                     },
-                    min: Some(0.0),
-                    max: Some(1439.0),
-                    step: Some(1.0),
-                    mode: NumberMode::Box,
+                    options: &home_assistant::HOUR_OPTIONS,
                     command_policy: CommandPolicy::default(),
-                    ..Default::default()
                 },
             );
-            let screen_schedule_end_minutes = embassy_ha::create_number(
+            let screen_schedule_start_minute = embassy_ha::create_select(
                 &device,
-                "screenScheduleEndMinutes",
-                NumberConfig {
+                "screenScheduleStartMinute",
+                SelectConfig {
                     common: EntityCommonConfig {
-                        name: Some("Screen Schedule End (minutes since midnight)"),
-                        icon: Some("mdi:clock-end"),
+                        name: Some("Screen Schedule Start Minute"),
+                        icon: Some("mdi:clock-outline"),
                         ..Default::default()
                     },
-                    min: Some(0.0),
-                    max: Some(1439.0),
-                    step: Some(1.0),
-                    mode: NumberMode::Box,
+                    options: &home_assistant::MINUTE_OPTIONS,
                     command_policy: CommandPolicy::default(),
-                    ..Default::default()
+                },
+            );
+
+            let screen_schedule_end_hour = embassy_ha::create_select(
+                &device,
+                "screenScheduleEndHour",
+                SelectConfig {
+                    common: EntityCommonConfig {
+                        name: Some("Screen Schedule End Hour"),
+                        icon: Some("mdi:clock-outline"),
+                        ..Default::default()
+                    },
+                    options: &home_assistant::HOUR_OPTIONS,
+                    command_policy: CommandPolicy::default(),
+                },
+            );
+            let screen_schedule_end_minute = embassy_ha::create_select(
+                &device,
+                "screenScheduleEndMinute",
+                SelectConfig {
+                    common: EntityCommonConfig {
+                        name: Some("Screen Schedule End Minute"),
+                        icon: Some("mdi:clock-outline"),
+                        ..Default::default()
+                    },
+                    options: &home_assistant::MINUTE_OPTIONS,
+                    command_policy: CommandPolicy::default(),
                 },
             );
 
             spawner
-                .spawn(home_assistant::ha_run_task(sta_stack, device, HOME_ASSISTANT_BROKER))
+                .spawn(home_assistant::ha_run_task(
+                    sta_stack,
+                    device,
+                    HOME_ASSISTANT_BROKER,
+                ))
                 .ok();
             spawner
-                .spawn(home_assistant::ha_power_task(status_cache, runtime_sender, power))
+                .spawn(home_assistant::ha_power_task(
+                    status_cache,
+                    runtime_sender,
+                    power,
+                ))
                 .ok();
             spawner
                 .spawn(home_assistant::ha_timer_enabled_task(
@@ -910,25 +1100,52 @@ async fn main(spawner: Spawner) -> ! {
                 ))
                 .ok();
             spawner
-                .spawn(home_assistant::ha_oled_task(status_cache, runtime_sender, oled))
-                .ok();
-            spawner
-                .spawn(home_assistant::ha_start_button_task(status_cache, runtime_sender, start))
-                .ok();
-            spawner
-                .spawn(home_assistant::ha_stop_button_task(status_cache, runtime_sender, stop))
-                .ok();
-            spawner
-                .spawn(home_assistant::ha_rpd_task(status_cache, runtime_sender, rpd))
-                .ok();
-            spawner
-                .spawn(home_assistant::ha_direction_task(status_cache, runtime_sender, direction))
-                .ok();
-            spawner
-                .spawn(home_assistant::ha_timer_start_minutes_task(
+                .spawn(home_assistant::ha_oled_task(
                     status_cache,
                     runtime_sender,
-                    timer_start_minutes,
+                    oled,
+                ))
+                .ok();
+            spawner
+                .spawn(home_assistant::ha_start_button_task(
+                    status_cache,
+                    runtime_sender,
+                    start,
+                ))
+                .ok();
+            spawner
+                .spawn(home_assistant::ha_stop_button_task(
+                    status_cache,
+                    runtime_sender,
+                    stop,
+                ))
+                .ok();
+            spawner
+                .spawn(home_assistant::ha_rpd_task(
+                    status_cache,
+                    runtime_sender,
+                    rpd,
+                ))
+                .ok();
+            spawner
+                .spawn(home_assistant::ha_direction_select_task(
+                    status_cache,
+                    runtime_sender,
+                    direction,
+                ))
+                .ok();
+            spawner
+                .spawn(home_assistant::ha_timer_hour_task(
+                    status_cache,
+                    runtime_sender,
+                    hour,
+                ))
+                .ok();
+            spawner
+                .spawn(home_assistant::ha_timer_minutes_task(
+                    status_cache,
+                    runtime_sender,
+                    minutes,
                 ))
                 .ok();
             spawner
@@ -953,14 +1170,18 @@ async fn main(spawner: Spawner) -> ! {
                 ))
                 .ok();
             spawner
-                .spawn(home_assistant::ha_rtc_offset_task(
+                .spawn(home_assistant::ha_rtc_offset_select_task(
                     status_cache,
                     runtime_sender,
                     rtc_offset,
                 ))
                 .ok();
             spawner
-                .spawn(home_assistant::ha_rtc_dst_task(status_cache, runtime_sender, rtc_dst))
+                .spawn(home_assistant::ha_rtc_dst_task(
+                    status_cache,
+                    runtime_sender,
+                    rtc_dst,
+                ))
                 .ok();
             spawner
                 .spawn(home_assistant::ha_screen_schedule_enabled_task(
@@ -970,17 +1191,46 @@ async fn main(spawner: Spawner) -> ! {
                 ))
                 .ok();
             spawner
-                .spawn(home_assistant::ha_screen_schedule_start_minutes_task(
+                .spawn(home_assistant::ha_screen_schedule_start_hour_task(
                     status_cache,
                     runtime_sender,
-                    screen_schedule_start_minutes,
+                    screen_schedule_start_hour,
                 ))
                 .ok();
             spawner
-                .spawn(home_assistant::ha_screen_schedule_end_minutes_task(
+                .spawn(home_assistant::ha_screen_schedule_start_minute_task(
                     status_cache,
                     runtime_sender,
-                    screen_schedule_end_minutes,
+                    screen_schedule_start_minute,
+                ))
+                .ok();
+            spawner
+                .spawn(home_assistant::ha_screen_schedule_end_hour_task(
+                    status_cache,
+                    runtime_sender,
+                    screen_schedule_end_hour,
+                ))
+                .ok();
+            spawner
+                .spawn(home_assistant::ha_screen_schedule_end_minute_task(
+                    status_cache,
+                    runtime_sender,
+                    screen_schedule_end_minute,
+                ))
+                .ok();
+            spawner
+                .spawn(home_assistant::ha_rssi_reception_task(
+                    status_cache,
+                    rssi_reception,
+                ))
+                .ok();
+            spawner
+                .spawn(home_assistant::ha_activity_task(status_cache, activity))
+                .ok();
+            spawner
+                .spawn(home_assistant::ha_current_epoch_task(
+                    status_cache,
+                    current_epoch,
                 ))
                 .ok();
         } else {
@@ -1000,4 +1250,3 @@ async fn main(spawner: Spawner) -> ! {
         embassy_time::Timer::after(Duration::from_secs(60)).await;
     }
 }
-

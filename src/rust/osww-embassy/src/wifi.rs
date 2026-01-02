@@ -12,6 +12,8 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::{Channel, Receiver, Sender};
 
 use crate::state::WifiStatus;
+#[cfg(feature = "embedded")]
+use crate::tasks::RuntimeCommand;
 
 /// Wi-Fi credentials provided by the user.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,6 +152,15 @@ where
     store: S,
     status: &'a WifiStatus,
     commands: Receiver<'a, CriticalSectionRawMutex, WifiCommand, N>,
+    #[cfg(feature = "embedded")]
+    runtime_sender: Option<
+        embassy_sync::channel::Sender<
+            'a,
+            embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+            RuntimeCommand,
+            N,
+        >,
+    >,
     provisioning: ProvisioningConfig,
     reconnect_interval_secs: u64,
 }
@@ -166,6 +177,15 @@ where
         store: S,
         status: &'a WifiStatus,
         commands: Receiver<'a, CriticalSectionRawMutex, WifiCommand, N>,
+        #[cfg(feature = "embedded")]
+        runtime_sender: Option<
+            embassy_sync::channel::Sender<
+                'a,
+                embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+                RuntimeCommand,
+                N,
+            >,
+        >,
         provisioning: ProvisioningConfig,
         reconnect_interval_secs: u64,
     ) -> Self {
@@ -174,6 +194,8 @@ where
             store,
             status,
             commands,
+            #[cfg(feature = "embedded")]
+            runtime_sender,
             provisioning,
             reconnect_interval_secs,
         }
@@ -226,6 +248,12 @@ where
                         let _ = self.control.disconnect().await;
                         if self.control.connect(&credentials).await.is_err() {
                             let _ = self.enter_provisioning().await;
+                        } else {
+                            // Mirror WiFiManager UX: after successful provisioning, reboot.
+                            // We ask the controller to render the success LED pattern first.
+                            if let Some(sender) = &self.runtime_sender {
+                                sender.send(RuntimeCommand::ProvisioningSuccess).await;
+                            }
                         }
                     }
                     WifiCommand::ForgetCredentials => {

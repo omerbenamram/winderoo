@@ -9,6 +9,7 @@
 extern crate alloc;
 
 pub mod hardware;
+pub mod captive_portal;
 pub mod http;
 #[cfg(feature = "esp32")]
 pub mod esp32;
