@@ -19,6 +19,10 @@ serde = { version = "1.0", features = ["derive"] }
 serde-wasm-bindgen = "0.6"
 console_error_panic_hook = { version = "0.1", optional = true }
 
+# Same graphics library used by the real firmware display
+embedded-graphics = "0.8"
+heapless = "0.8"
+
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
 

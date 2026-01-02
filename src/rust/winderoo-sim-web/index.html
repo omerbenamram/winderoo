@@ -151,17 +151,7 @@
         margin-bottom: 16px;
       }
 
-      .oled-frame {
-        background: #000;
-        border-radius: 8px;
-        padding: 12px;
-        border: 2px solid #1a1a1a;
-        box-shadow: 
-          inset 0 0 20px rgba(0, 255, 170, 0.05),
-          0 0 30px rgba(0, 0, 0, 0.5);
-        flex: 1;
-        display: flex;
-        flex-direction: column;
+      /* Removed: .oled-frame - display is now only in 3D */
       }
 
       .oled-screen {
@@ -226,9 +216,9 @@
         50% { opacity: 0.5; }
       }
 
-      /* Device status below OLED */
+      /* Device status panel */
       .device-status {
-        margin-top: 20px;
+        margin-top: 0;
         padding: 16px;
         background: var(--bg-tertiary);
         border-radius: 8px;
@@ -618,29 +608,7 @@
       </div>
 
       <div class="oled-panel">
-        <h2>OLED Display</h2>
-        <div class="oled-frame">
-          <div class="oled-screen" id="oled-screen">
-            <div class="status" id="oled-status">Stopped</div>
-            <div class="info-row">
-              <span>Direction</span>
-              <span id="oled-direction">BOTH</span>
-            </div>
-            <div class="info-row">
-              <span>TPD</span>
-              <span id="oled-tpd">220</span>
-            </div>
-            <div class="progress-bar">
-              <div class="fill" id="oled-progress" style="width: 0%"></div>
-            </div>
-            <div class="info-row">
-              <span>Progress</span>
-              <span id="oled-progress-text">0%</span>
-            </div>
-            <div class="notification" id="oled-notification" style="display: none;"></div>
-          </div>
-        </div>
-
+        <h2>Device Status</h2>
         <div class="device-status">
           <div class="row">
             <span class="label">Motor</span>

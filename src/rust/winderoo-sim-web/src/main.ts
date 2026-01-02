@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import type { WasmSimulator as WasmSimulatorWasm } from '../pkg/winderoo_sim_web';
+import { OledDisplay } from './oled-display';
 
 // Types for the WASM simulator
 interface SimState {
@@ -62,12 +63,39 @@ let statusLED: THREE.Mesh;
 let oledLight: THREE.PointLight;
 let motorIndicator: THREE.Mesh; // Visual indicator for rotation
 
+// OLED display simulator
+let oledDisplay: OledDisplay | null = null;
+let oledTexture: THREE.CanvasTexture | null = null;
+
 // Initialize everything
 async function init() {
   initThreeJS();
   initUI();
+  initOledDisplay();
   await initWasm();
   animate();
+}
+
+// Initialize the OLED display simulator (3D texture only)
+function initOledDisplay() {
+  // Create display for 3D texture only - no DOM container needed
+  oledDisplay = new OledDisplay(null);
+
+  // Create texture from OLED canvas for 3D model
+  if (oledDisplay) {
+    oledTexture = new THREE.CanvasTexture(oledDisplay.getCanvas());
+    oledTexture.minFilter = THREE.NearestFilter;
+    oledTexture.magFilter = THREE.NearestFilter; // Keep pixels sharp
+
+    // Apply texture to 3D OLED screen
+    const oledMesh = watchWinder?.getObjectByName('oledScreen') as THREE.Mesh;
+    if (oledMesh) {
+      oledMesh.material = new THREE.MeshBasicMaterial({
+        map: oledTexture,
+        transparent: false,
+      });
+    }
+  }
 }
 
 // Load WASM module
@@ -400,8 +428,8 @@ function createWatchWinder() {
   oledFrame.position.set(0, -bodySize / 2 + 0.35, bodyDepth / 2 + 0.05);
   watchWinder.add(oledFrame);
 
-  // OLED screen glow
-  const oledScreenGeometry = new THREE.PlaneGeometry(1.0, 0.35);
+  // OLED screen - 128x64 aspect ratio (2:1)
+  const oledScreenGeometry = new THREE.PlaneGeometry(1.0, 0.5); // 2:1 aspect ratio
   const oledScreenMaterial = new THREE.MeshBasicMaterial({
     color: 0x00ffaa,
     transparent: true,
@@ -566,40 +594,22 @@ function updateUI() {
   document.getElementById('sim-time')!.textContent = state.time_of_day;
   document.getElementById('sim-epoch')!.textContent = state.now_epoch.toString();
 
-  // OLED display
-  const oledScreen = document.getElementById('oled-screen')!;
-  if (state.display_on && !state.screen_sleep) {
-    oledScreen.classList.remove('off');
-    document.getElementById('oled-status')!.textContent = state.status;
-    document.getElementById('oled-direction')!.textContent = state.direction;
-    document.getElementById('oled-tpd')!.textContent = state.rotations_per_day.toString();
+  // Update OLED display from Rust-rendered buffer
+  // The display content is rendered in Rust using the SAME embedded-graphics
+  // code as the real firmware, ensuring pixel-perfect accuracy.
+  if (oledDisplay && simulator) {
+    const buffer = simulator.getDisplayBuffer();
+    oledDisplay.renderBuffer(buffer);
 
-    const progress = Math.round(state.cycle_progress * 100);
-    (document.getElementById('oled-progress') as HTMLElement).style.width = `${progress}%`;
-    document.getElementById('oled-progress-text')!.textContent = `${progress}%`;
-
-    const notificationEl = document.getElementById('oled-notification')!;
-    if (state.display_notification) {
-      notificationEl.textContent = state.display_notification;
-      notificationEl.style.display = 'block';
-    } else {
-      notificationEl.style.display = 'none';
-    }
-
-    // Update 3D OLED glow
-    oledLight.intensity = 0.5;
-    const oledMesh = watchWinder.getObjectByName('oledScreen') as THREE.Mesh;
-    if (oledMesh) {
-      (oledMesh.material as THREE.MeshBasicMaterial).opacity = 0.8;
-    }
-  } else {
-    oledScreen.classList.add('off');
-    oledLight.intensity = 0;
-    const oledMesh = watchWinder.getObjectByName('oledScreen') as THREE.Mesh;
-    if (oledMesh) {
-      (oledMesh.material as THREE.MeshBasicMaterial).opacity = 0.1;
+    // Update 3D texture from canvas
+    if (oledTexture) {
+      oledTexture.needsUpdate = true;
     }
   }
+
+  // Update 3D OLED glow based on display state
+  const displayActive = state.display_on && !state.screen_sleep;
+  oledLight.intensity = displayActive ? 0.5 : 0;
 
   // Device status
   document.getElementById('status-motor')!.textContent = state.motor_running ? '🟢 Running' : 'Stopped';

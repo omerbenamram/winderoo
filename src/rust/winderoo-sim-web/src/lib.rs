@@ -2,14 +2,20 @@
 //!
 //! This module exposes the firmware simulation engine to JavaScript via wasm-bindgen,
 //! allowing a web-based Three.js frontend to drive the simulation.
+//!
+//! The display rendering uses the SAME embedded-graphics code as the real firmware,
+//! ensuring pixel-perfect accuracy between simulator and hardware.
 
+mod display;
+
+use display::{DisplaySnapshot, SimDisplay, DISPLAY_HEIGHT, DISPLAY_WIDTH};
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 use winderoo_firmware::controller::{Controller, ControllerEvent};
-use winderoo_firmware::hardware::{LedPattern, RandomSource, XorShift32};
+use winderoo_firmware::hardware::{LedPattern, XorShift32};
 use winderoo_firmware::model::{
-    Direction, MotorDirection, RuntimeState, RoutineState, RtcConfig, ScreenSchedule, ScreenState,
-    SettingsSnapshot, TimerConfig, UpdateAction, UpdateRequest, WinderStatus,
+    Direction, MotorDirection, RoutineState, RtcConfig, RuntimeState, ScreenSchedule, ScreenState,
+    TimerConfig, UpdateAction, UpdateRequest, WinderStatus,
 };
 use winderoo_firmware::settings::StoredSettings;
 use winderoo_firmware::time::{time_of_day_from_epoch, TimeOfDay};
@@ -109,23 +115,23 @@ pub struct WasmSimulator {
     tick_interval_ms: u64,
     stored_settings: StoredSettings,
     controller: Controller<XorShift32>,
-    
+
     // Simulated hardware state
     motor_running: bool,
     motor_direction: Option<MotorDirection>,
-    motor_angle: f64, // cumulative angle for 3D viz
+    motor_angle: f64,            // cumulative angle for 3D viz
     motor_angular_velocity: f64, // degrees per ms
-    
+
     led_pattern: Option<LedPattern>,
-    
+
+    /// Simulated OLED display using the SAME rendering code as real firmware.
+    sim_display: SimDisplay,
     display_on: bool,
-    display_title: Option<String>,
-    display_notification: Option<String>,
-    
+
     // Event trace for visualization
     trace: Vec<TraceEntry>,
     max_trace_entries: usize,
-    
+
     // Pause handling
     pause_remaining_ms: u64,
 }
@@ -142,6 +148,9 @@ impl WasmSimulator {
         let rng = XorShift32::new(1);
         let controller = Controller::new(state, rng);
 
+        let mut sim_display = SimDisplay::new();
+        sim_display.draw_static("Stopped");
+
         Self {
             now_ms: 0,
             tick_interval_ms: 500,
@@ -152,9 +161,8 @@ impl WasmSimulator {
             motor_angle: 0.0,
             motor_angular_velocity: 45.0, // 45 degrees per second = nice visible rotation
             led_pattern: None,
+            sim_display,
             display_on: true,
-            display_title: Some("Stopped".into()),
-            display_notification: None,
             trace: Vec::new(),
             max_trace_entries: 500,
             pause_remaining_ms: 0,
@@ -215,8 +223,8 @@ impl WasmSimulator {
             motor_angle: self.motor_angle,
             led_pattern: self.led_pattern.map(|p| format!("{:?}", p)),
             display_on: self.display_on && !self.controller.state.screen.sleep,
-            display_title: self.display_title.clone(),
-            display_notification: self.display_notification.clone(),
+            display_title: None, // Now rendered via display buffer
+            display_notification: None, // Now rendered via display buffer
             winder_enabled: self.controller.state.winder_enabled,
             status: self.controller.state.status.as_str().into(),
             direction: self.controller.state.direction.as_api_str().into(),
@@ -238,6 +246,31 @@ impl WasmSimulator {
             screen_sleep: self.controller.state.screen.sleep,
         };
         serde_wasm_bindgen::to_value(&state).unwrap_or(JsValue::NULL)
+    }
+
+    /// Get the OLED display frame buffer.
+    ///
+    /// Returns a Uint8Array of 128*64 = 8192 bytes where each byte is 0 (off) or 1 (on).
+    /// This buffer is rendered using the SAME embedded-graphics code as the real firmware.
+    #[wasm_bindgen(js_name = getDisplayBuffer)]
+    pub fn get_display_buffer(&self) -> Vec<u8> {
+        if self.display_on && !self.controller.state.screen.sleep {
+            self.sim_display.get_buffer()
+        } else {
+            // Display is off - return all zeros
+            vec![0u8; DISPLAY_WIDTH * DISPLAY_HEIGHT]
+        }
+    }
+
+    /// Get display dimensions.
+    #[wasm_bindgen(js_name = getDisplayWidth)]
+    pub fn get_display_width(&self) -> u32 {
+        DISPLAY_WIDTH as u32
+    }
+
+    #[wasm_bindgen(js_name = getDisplayHeight)]
+    pub fn get_display_height(&self) -> u32 {
+        DISPLAY_HEIGHT as u32
     }
 
     /// Get recent trace events for visualization.
@@ -294,7 +327,7 @@ impl WasmSimulator {
         let now_epoch = self.now_ms / 1000;
         let now_time = time_of_day_from_epoch(now_epoch);
         let events = self.controller.tick(now_epoch, now_time);
-        
+
         self.dispatch_events(events);
 
         old_motor != self.motor_running || (self.motor_angle - old_angle).abs() > 0.01
@@ -454,21 +487,25 @@ impl WasmSimulator {
             }
             ControllerEvent::DisplayClear => {
                 self.display_on = false;
-                self.display_title = None;
-                self.display_notification = None;
+                self.sim_display.clear();
                 self.push_trace(TracedEvent::DisplayClear);
             }
             ControllerEvent::DisplayStatic { title } => {
                 self.display_on = true;
-                self.display_title = Some(title.clone());
+                // Update snapshot before drawing
+                self.update_display_snapshot();
+                self.sim_display.draw_static(&title);
                 self.push_trace(TracedEvent::DisplayStatic { title });
             }
             ControllerEvent::DisplayDynamic => {
-                // Intentionally not traced. It's a "refresh dynamic values" heartbeat that is
-                // emitted on essentially every tick while the screen is on.
+                // Update snapshot and redraw - uses SAME code as real firmware
+                self.update_display_snapshot();
+                self.sim_display.draw_dynamic();
+                // Intentionally not traced - it's a heartbeat
             }
             ControllerEvent::DisplayNotification(message) => {
-                self.display_notification = Some(message.clone());
+                self.update_display_snapshot();
+                self.sim_display.notify(&message);
                 self.push_trace(TracedEvent::DisplayNotification { message });
             }
             ControllerEvent::Led(pattern) => {
@@ -515,8 +552,29 @@ impl WasmSimulator {
         self.motor_direction = None;
         self.led_pattern = None;
         self.display_on = true;
-        self.display_title = Some("Stopped".into());
-        self.display_notification = None;
+        self.update_display_snapshot();
+        self.sim_display.draw_static("Stopped");
+    }
+
+    /// Update the display snapshot from controller state.
+    ///
+    /// This mirrors how `StatusCache` works in the real firmware.
+    fn update_display_snapshot(&mut self) {
+        let state = &self.controller.state;
+        let mut status = heapless::String::<16>::new();
+        let _ = status.push_str(state.status.as_str());
+
+        let mut direction = heapless::String::<8>::new();
+        let _ = direction.push_str(state.direction.as_api_str());
+
+        self.sim_display.update_snapshot(DisplaySnapshot {
+            status,
+            rotations_per_day: state.rotations_per_day,
+            direction,
+            timer_hour: state.timer.start_time.hour,
+            timer_minutes: state.timer.start_time.minute,
+            timer_enabled: state.timer.enabled,
+        });
     }
 }
 
