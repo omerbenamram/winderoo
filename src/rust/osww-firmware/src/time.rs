@@ -41,8 +41,12 @@ impl TimeOfDay {
     /// Parse a `HH:MM` string into a [`TimeOfDay`].
     pub fn parse_hh_mm(input: &str) -> Result<Self, TimeError> {
         let mut parts = input.split(':');
-        let hour_str = parts.next().ok_or_else(|| TimeError::InvalidFormat(input.to_string()))?;
-        let minute_str = parts.next().ok_or_else(|| TimeError::InvalidFormat(input.to_string()))?;
+        let hour_str = parts
+            .next()
+            .ok_or_else(|| TimeError::InvalidFormat(input.to_string()))?;
+        let minute_str = parts
+            .next()
+            .ok_or_else(|| TimeError::InvalidFormat(input.to_string()))?;
         if parts.next().is_some() {
             return Err(TimeError::InvalidFormat(input.to_string()));
         }
@@ -68,15 +72,39 @@ impl TimeOfDay {
 
 /// Convert a UTC epoch into a local [`TimeOfDay`] using a GMT offset and DST flag.
 pub fn time_of_day_from_epoch(epoch: u64, gmt_offset: f32, dst: bool) -> TimeOfDay {
-    let mut offset_secs = (gmt_offset * 3600.0).round() as i64;
-    if dst {
-        offset_secs += 3600;
-    }
-    let adjusted = epoch as i64 + offset_secs;
+    let adjusted = (epoch as i128) + (offset_seconds(gmt_offset, dst) as i128);
     let seconds_in_day = ((adjusted % 86_400) + 86_400) % 86_400;
     let hour = (seconds_in_day / 3600) as u8;
     let minute = ((seconds_in_day % 3600) / 60) as u8;
     TimeOfDay::new(hour, minute).unwrap_or(TimeOfDay { hour: 0, minute: 0 })
+}
+
+/// Convert a UTC epoch into a "local epoch" by applying the configured GMT offset and DST flag.
+///
+/// This mirrors the legacy Arduino firmware behavior where the "RTC epoch" is effectively
+/// timezone-shifted (UTC + offset), and clients format it in UTC to display local wall clock time.
+///
+/// Notes:
+/// - `epoch == 0` is treated as "unset" and returned unchanged.
+/// - The returned value is clamped at 0 to avoid underflow for extreme inputs.
+pub fn epoch_with_offset(epoch: u64, gmt_offset: f32, dst: bool) -> u64 {
+    if epoch == 0 {
+        return 0;
+    }
+    let adjusted = (epoch as i128) + (offset_seconds(gmt_offset, dst) as i128);
+    if adjusted <= 0 {
+        0
+    } else {
+        adjusted as u64
+    }
+}
+
+fn offset_seconds(gmt_offset: f32, dst: bool) -> i64 {
+    let mut offset_secs = (gmt_offset * 3600.0).round() as i64;
+    if dst {
+        offset_secs += 3600;
+    }
+    offset_secs
 }
 
 impl fmt::Display for TimeOfDay {
@@ -124,5 +152,17 @@ mod tests {
         let epoch = 23 * 3600 + 30 * 60;
         let time = time_of_day_from_epoch(epoch, -5.0, true);
         assert_eq!(time, TimeOfDay::new(19, 30).unwrap());
+    }
+
+    #[test]
+    fn epoch_with_offset_shifts_seconds() {
+        // 01:00 UTC, offset +2 => local epoch corresponds to 03:00 UTC.
+        let epoch = 3600;
+        assert_eq!(epoch_with_offset(epoch, 2.0, false), 10_800);
+    }
+
+    #[test]
+    fn epoch_with_offset_preserves_zero() {
+        assert_eq!(epoch_with_offset(0, 5.0, true), 0);
     }
 }

@@ -8,6 +8,67 @@ Port the existing ESP32 firmware to Rust using ESP-IDF services to preserve feat
 - Most stable and documented path for ESP32 in Rust today.
 - Fastest route to a working device with minimal behavior drift.
 
+## Current parity status (vs `src/platformio/osww-server`) — 2026-01-02
+
+### Baseline
+- **PlatformIO (Arduino/C++)**: `src/platformio/osww-server/src/main.cpp` (+ `src/platformio/osww-server/src/utils/*`)
+- **Rust (ESP-IDF)**: `src/rust/osww-firmware` (runtime in `src/rust/osww-firmware/src/esp32.rs`, portable logic in `api.rs`, `controller.rs`, `settings.rs`, `model.rs`, `time.rs`)
+
+### Parity matrix
+
+| Area | PlatformIO (Arduino/C++) | Rust (`esp-idf-svc`) | Notes / deltas |
+|---|---|---|---|
+| Build + SDK | PlatformIO/Arduino | Cargo + `esp-idf-sys`/`esp-idf-svc` (`esp32` feature) | Rust pulls LittleFS + mDNS via ESP component registry |
+| Wi‑Fi provisioning | WiFiManager captive portal | AP-mode config portal + restart | Portal UX differs (no dark mode / timeout); functional parity |
+| Wi‑Fi credential persistence | WiFiManager internal | NVS (`wifi/ssid`, `wifi/password`) | Equivalent outcome |
+| Filesystem | Arduino LittleFS | `esp_idf_svc::fs::littlefs` mounted at `"/littlefs"` | C++ paths are `/settings.json` and `/css|/js|/index.html`; Rust expects the same assets under `"/littlefs"` |
+| Settings schema | JSON settings file | `StoredSettings` JSON | Keys match C++ (`savedStatus`, `savedTPD`, `gmtOffset`, `dst`, screen schedule fields, etc.) |
+| HTTP API routes | AsyncWebServer | `EspHttpServer` | `/api/status`, `/api/timer`, `/api/power`, `/api/update`, `/api/reset` implemented |
+| CORS / OPTIONS | Global default headers + 404 handler for OPTIONS | Per-response CORS headers + wildcard OPTIONS handler | Equivalent behavior for browser clients |
+| Static frontend hosting | `serveStatic()` from LittleFS | Wildcard static handler from LittleFS (+ `.gz` support) | Repo currently doesn’t include uploaded FS assets; still requires a build/upload step |
+| mDNS | `MDNS.begin("winderoo"); addService("_winderoo","_tcp",80)` | `EspMdns::set_hostname("winderoo"); add_service("_winderoo","_tcp",80)` | Match |
+| Time sync | NTPClient + ESP32Time RTC | SNTP (`EspSntp`) | **Confirmed semantic**: API “epoch” values are treated as *local-shifted* epochs (UTC + offset [+DST]). Frontend formats with timezone `UTC` to display local wall-clock time. Rust should emit shifted epochs for parity. |
+| Timer start | RTC hour/minute comparison | `controller.tick()` uses `time_of_day_from_epoch()` | Match |
+| Winding routine | Pause windows + BOTH mode direction toggling + random gate | Same algorithm in `controller.rs` | Match (including progress 0..1) |
+| Motor control | GPIO 25/26, optional PWM motor driver | GPIO 25/26, optional LEDC PWM (`pwm-motor`) | Same behavior, different driver backend |
+| LED patterns | PWM pulse + slow/fast blink | Same timings via LEDC | Match |
+| OLED UI | Adafruit_SSD1306 layout | `ssd1306` + `embedded-graphics` layout | Core UI matches; missing C++ config toggles (invert/rotate) + a few cosmetic screens/icons |
+| Screen scheduling | Same-day + overnight schedule | `ScreenSchedule::should_be_awake()` + controller enforcement | Match |
+| Home Assistant MQTT | ArduinoHA entities | MQTT + HA discovery (`home-assistant` feature) | Implemented but not guaranteed byte-for-byte identical entity metadata |
+| Reset behavior | `/api/reset` resets WiFiManager + reboot | `/api/reset` clears NVS Wi‑Fi creds + reboot | Equivalent outcome |
+
+### Time/epoch semantics (details)
+
+**Why this matters**: the UI assumes `currentTimeEpoch` is already “local time”, not a pure UTC epoch.
+
+- **C++ behavior**:
+  - Applies `setTimeOffset((gmtOffset [+DST]) * 3600)` to `NTPClient` *before* reading epoch.
+  - Sets `ESP32Time rtc` from those already-offset components.
+  - `/api/status` returns `rtc.getEpoch()` and routine epochs derived from it ⇒ epochs are effectively **UTC + offset (+DST)**.
+
+- **Frontend proof point (Angular)**:
+  - The UI renders the device clock using `date:'mediumTime':'UTC'`. That only displays the configured local wall-clock time if the epoch is already shifted.
+  - Progress is computed using the three epoch fields; they must all be in the same epoch domain.
+
+- **Rust parity implementation**:
+  - Internals keep system time in UTC (SNTP) and compute time-of-day via `time_of_day_from_epoch(epoch_utc, gmtOffset, dst)`.
+  - API boundary shifts epochs via `epoch_with_offset(epoch_utc, gmtOffset, dst)` for:
+    - `currentTimeEpoch`
+    - `startTimeEpoch`
+    - `estimatedRoutineFinishEpoch`
+  - Home Assistant `rtc_epoch` is published using the same shifted epoch.
+
+### Phase status (today)
+- [x] Project skeleton + build (ESP-IDF + `esp-idf-svc`)
+- [x] Hardware layer (motor + LED + button + optional OLED)
+- [x] Wi‑Fi provisioning / portal
+- [x] Filesystem + settings JSON
+- [x] HTTP API + static hosting + CORS
+- [x] Time sync + scheduling
+- [x] OLED UI (core parity; some polish deltas)
+- [x] Home Assistant MQTT (feature-gated)
+- [~] Validation: unit tests exist for host-side logic; on-device smoke checklist still needed
+
 ## Phases
 
 ### 1) Project skeleton + build

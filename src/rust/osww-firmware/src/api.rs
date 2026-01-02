@@ -2,7 +2,7 @@
 
 use crate::model::{Direction, RuntimeState, WinderStatus};
 use crate::settings::StoredSettings;
-use crate::time::TimeOfDay;
+use crate::time::{epoch_with_offset, TimeOfDay};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -406,15 +406,27 @@ impl StatusResponse {
         rssi: i32,
         api_version: &str,
     ) -> Self {
+        let start_time_epoch = epoch_with_offset(
+            state.routine.start_epoch,
+            state.rtc.gmt_offset,
+            state.rtc.dst,
+        );
+        let current_time_epoch =
+            epoch_with_offset(current_epoch, state.rtc.gmt_offset, state.rtc.dst);
+        let estimated_routine_finish_epoch = epoch_with_offset(
+            state.routine.estimated_finish_epoch,
+            state.rtc.gmt_offset,
+            state.rtc.dst,
+        );
         Self {
             status: state.status_str().to_string(),
             rotations_per_day: state.rotations_per_day.to_string(),
             direction: state.direction.as_api_str().to_string(),
             hour: format!("{:02}", state.timer.start_time.hour),
             minutes: format!("{:02}", state.timer.start_time.minute),
-            start_time_epoch: state.routine.start_epoch,
-            current_time_epoch: current_epoch,
-            estimated_routine_finish_epoch: state.routine.estimated_finish_epoch,
+            start_time_epoch,
+            current_time_epoch,
+            estimated_routine_finish_epoch,
             winder_enabled: if state.winder_enabled {
                 "1".to_string()
             } else {

@@ -5,7 +5,7 @@ use crate::controller::{calculate_winding_duration_secs, Controller, ControllerE
 use crate::hardware::{LedPattern, XorShift32};
 use crate::model::{Direction, MotorDirection, RuntimeState, WinderStatus};
 use crate::settings::{SettingsError, StoredSettings};
-use crate::time::{time_of_day_from_epoch, TimeOfDay};
+use crate::time::{epoch_with_offset, time_of_day_from_epoch, TimeOfDay};
 use embedded_svc::http::headers::content_type;
 use embedded_svc::http::Method;
 use embedded_svc::io::{Read as SvcRead, Write as SvcWrite};
@@ -1912,6 +1912,7 @@ fn ha_config_messages(device_id: &str, _state: &RuntimeState) -> Vec<(String, St
 #[cfg(feature = "home-assistant")]
 fn ha_state_messages(device_id: &str, state: &RuntimeState, rssi: i32) -> Vec<(String, String)> {
     let base = format!("winderoo/{device_id}");
+    let rtc_epoch = epoch_with_offset(current_epoch(), state.rtc.gmt_offset, state.rtc.dst);
     vec![
         (
             format!("{base}/power"),
@@ -1985,7 +1986,7 @@ fn ha_state_messages(device_id: &str, state: &RuntimeState, rssi: i32) -> Vec<(S
             format!("{base}/screen_schedule_end_minute"),
             format!("{:02}", state.screen.schedule.end.minute),
         ),
-        (format!("{base}/rtc_epoch"), current_epoch().to_string()),
+        (format!("{base}/rtc_epoch"), rtc_epoch.to_string()),
     ]
 }
 
