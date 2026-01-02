@@ -6,7 +6,7 @@ use crate::hardware::LedPattern;
 use crate::model::{MotorDirection, RuntimeState};
 use esp_idf_hal::gpio::{Input, PinDriver, Pull};
 #[cfg(not(feature = "pwm-motor"))]
-use esp_idf_hal::gpio::{Output, Pin};
+use esp_idf_hal::gpio::Output;
 use esp_idf_hal::i2c::{I2cConfig, I2cDriver};
 use esp_idf_hal::ledc::{config::TimerConfig, LedcDriver, LedcTimerDriver};
 use esp_idf_hal::prelude::*;
@@ -47,6 +47,9 @@ impl Hardware {
             channel2,
             ..
         } = ledc;
+
+        #[cfg(not(feature = "pwm-motor"))]
+        let _ = (timer1, channel1, channel2);
 
         let led_timer =
             LedcTimerDriver::new(timer0, &TimerConfig::default().frequency(5.kHz().into()))?;
