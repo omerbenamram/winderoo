@@ -7,12 +7,13 @@ use crate::model::{MotorDirection, RuntimeState};
 #[cfg(not(feature = "pwm-motor"))]
 use esp_idf_hal::gpio::Output;
 use esp_idf_hal::gpio::{Input, PinDriver, Pull};
-use esp_idf_hal::i2c::{I2cConfig, I2cDriver};
 use esp_idf_hal::ledc::{config::TimerConfig, LedcDriver, LedcTimerDriver};
 use esp_idf_hal::prelude::*;
 use std::thread;
 use std::time::Duration;
 
+#[cfg(feature = "oled")]
+use esp_idf_hal::i2c::{I2cConfig, I2cDriver};
 #[cfg(feature = "oled")]
 use super::oled::OledDisplay;
 use super::Esp32Error;
@@ -51,11 +52,14 @@ impl Hardware {
         #[cfg(not(feature = "pwm-motor"))]
         let _ = (timer1, channel1, channel2);
 
+        // C++ used LEDC to drive the onboard LED (typically GPIO2 / LED_BUILTIN on ESP32 devkits).
         let led_timer =
             LedcTimerDriver::new(timer0, &TimerConfig::default().frequency(5.kHz().into()))?;
         let led_driver = LedcDriver::new(channel0, &led_timer, pins.gpio2)?;
         let led = LedControl::new(led_timer, led_driver);
 
+        // Pin choices match the default "L298N" wiring from the Arduino firmware:
+        // `directionalPinA = 25`, `directionalPinB = 26`.
         let motor = MotorControl::new(
             pins.gpio25,
             pins.gpio26,
@@ -67,11 +71,14 @@ impl Hardware {
             channel2,
         )?;
 
+        // External button support (C++: `externalButton = 13`).
+        // We enable a pull-down so "unpressed" reads stable low.
         let mut button = PinDriver::input(pins.gpio13)?;
         button.set_pull(Pull::Down)?;
 
         #[cfg(feature = "oled")]
         let display = {
+            // Default I2C pins are the same as typical Arduino/Wire wiring: SDA=21, SCL=22.
             let config = I2cConfig::new().baudrate(400.kHz().into());
             let i2c = I2cDriver::new(_i2c0, pins.gpio21, pins.gpio22, &config)?;
             Some(OledDisplay::new(i2c)?)
@@ -111,6 +118,8 @@ impl Hardware {
     }
 
     pub(super) fn display_static(&mut self, title: &str) -> Result<(), Esp32Error> {
+        #[cfg(not(feature = "oled"))]
+        let _ = title;
         #[cfg(feature = "oled")]
         if let Some(display) = &mut self.display {
             display.draw_static(title)?;
@@ -123,8 +132,11 @@ impl Hardware {
         state: &RuntimeState,
         rssi: i32,
     ) -> Result<(), Esp32Error> {
+        #[cfg(not(feature = "oled"))]
+        let _ = (state, rssi);
         #[cfg(feature = "oled")]
         if let Some(display) = &mut self.display {
+            // Screen sleep is driven by controller state (timer/schedule/UI), so hardware just obeys.
             if !state.screen.sleep {
                 display.draw_dynamic(state, rssi)?;
             }
@@ -133,6 +145,8 @@ impl Hardware {
     }
 
     pub(super) fn display_notification(&mut self, message: &str) -> Result<(), Esp32Error> {
+        #[cfg(not(feature = "oled"))]
+        let _ = message;
         #[cfg(feature = "oled")]
         if let Some(display) = &mut self.display {
             display.draw_notification(message)?;
@@ -286,6 +300,7 @@ impl LedControl {
     }
 
     fn trigger(&mut self, pattern: LedPattern) -> Result<(), Esp32Error> {
+        // Keep patterns deterministic: clear any previous PWM state before starting a new pattern.
         self.off()?;
         thread::sleep(Duration::from_millis(50));
         match pattern {

@@ -1,4 +1,10 @@
 //! ESP32 runtime integration using ESP-IDF services.
+//!
+//! This is the Rust port of the Arduino sketch-style `main.cpp`:
+//! `src/platformio/osww-server/src/main.cpp`.
+//!
+//! High-level idea: the pure "business logic" lives in `Controller` and emits events.
+//! This module wires those events to ESP32 side-effects (motor/LED/OLED, LittleFS, Wi‑Fi, MQTT).
 
 mod events;
 #[cfg(feature = "home-assistant")]
@@ -99,12 +105,24 @@ pub fn run() -> Result<(), Esp32Error> {
     let runtime = stored.to_runtime(screen_equipped)?;
     let rng_seed = unsafe { esp_idf_sys::esp_random() };
 
+    // Rust replacement for the big set of Arduino globals in `main.cpp`:
+    // - controller state (what was `userDefinedSettings`, `routineRunning`, timestamps, etc)
+    // - a couple of cross-cutting runtime signals (RSSI + reset request)
+    //
+    // We put it behind `Arc<Mutex<...>>` because it is touched from:
+    // - the main control loop (tick/button)
+    // - HTTP handlers (API updates)
+    // - MQTT command ingestion (Home Assistant)
+    //
+    // Keep lock scopes *small* and never call blocking IO (FS/network/delays) while holding it.
     let shared = Arc::new(Mutex::new(SharedState {
         controller: Controller::new(runtime, XorShift32::new(rng_seed)),
         rssi: -100,
         reset_requested: false,
     }));
 
+    // Hardware drivers are not thread-safe and share peripherals (GPIO/I2C/LEDC).
+    // The mutex is our "single-threaded peripheral access" gate.
     let hardware = Arc::new(Mutex::new(hardware));
     let storage = Arc::new(storage);
 
@@ -113,6 +131,8 @@ pub fn run() -> Result<(), Esp32Error> {
         sysloop.clone(),
     )?;
 
+    // Mirrors the C++ WiFiManager flow:
+    // try saved credentials; if missing/failing, boot into a setup AP + captive portal.
     let creds = WifiCredentials::load(&nvs)?;
     if let Some(creds) = creds {
         if let Err(err) = connect_wifi(&mut wifi, &creds) {
@@ -129,11 +149,15 @@ pub fn run() -> Result<(), Esp32Error> {
 
     sync_time()?;
 
+    // Start the HTTP server early so the UI can drive configuration/state.
+    // Handlers take `Arc` clones and lock `SharedState` only long enough to compute controller events.
     let _server = http::start_http_server(shared.clone(), hardware.clone(), storage.clone())?;
 
     #[cfg(feature = "home-assistant")]
     let ha = HomeAssistant::try_new(shared.clone(), API_VERSION)?;
 
+    // C++: if `savedStatus == "Winding"` we resume the routine on boot.
+    // Rust: let the controller decide what needs to happen based on persisted runtime + current time.
     resume_if_needed(&shared, &hardware, &storage)?;
 
     run_loop(
@@ -162,9 +186,12 @@ fn resume_if_needed(
 ) -> Result<(), Esp32Error> {
     let now = current_epoch();
     let events = {
+        // Lock only while mutating controller state.
         let mut guard = shared.lock().map_err(|_| Esp32Error::Lock)?;
         guard.controller.resume_if_needed(now)
     };
+    // Apply side-effects after we drop the controller lock (prevents long hardware/FS work from
+    // blocking HTTP/MQTT threads).
     events::apply_events(shared, hardware, storage, events)
 }
 
@@ -177,6 +204,7 @@ fn run_loop(
     #[cfg(feature = "home-assistant")] mut ha: Option<HomeAssistant>,
 ) -> Result<(), Esp32Error> {
     let mut last_tick = Instant::now();
+    #[cfg(feature = "home-assistant")]
     let mut last_ha_publish = Instant::now();
 
     loop {
@@ -184,6 +212,8 @@ fn run_loop(
             let epoch = current_epoch();
             let events = {
                 let mut guard = shared.lock().map_err(|_| Esp32Error::Lock)?;
+                // RSSI is exposed to UI/HA (and used for the OLED "bars").
+                // Store it in shared state so *all* publishers see a consistent value.
                 guard.rssi = wifi
                     .wifi_mut()
                     .driver_mut()
@@ -195,6 +225,8 @@ fn run_loop(
                     guard.controller.state.rtc.gmt_offset,
                     guard.controller.state.rtc.dst,
                 );
+                // This is the ported equivalent of `loop()` in C++: the controller advances time
+                // and returns a list of side-effects to execute.
                 let events = guard.controller.tick(epoch, time);
                 events
             };
@@ -203,12 +235,16 @@ fn run_loop(
         }
 
         if check_reset_requested(&shared)? {
+            // C++ kept a `reset` global flag and performed the actual reset from the main loop.
+            // We do the same: HTTP/MQTT can *request* a reset, but only the main loop performs it
+            // so we can show notifications, flush storage, and restart from a safe context.
             notify_and_restart(&shared, &hardware, &storage, &nvs)?;
         }
 
         if let Ok(button_pressed) = read_button(&hardware) {
             if button_pressed {
                 let events = {
+                    // Physical button is treated like a "hard stop" (power off).
                     let mut guard = shared.lock().map_err(|_| Esp32Error::Lock)?;
                     guard.controller.apply_power(false)
                 };
@@ -223,6 +259,8 @@ fn run_loop(
                     ha.publish_state(&shared)?;
                     last_ha_publish = Instant::now();
                 }
+                // Commands are collected by the MQTT callback thread and applied here, in-band with
+                // the main loop, to keep lock contention predictable.
                 ha.drain_commands(&shared, &hardware, &storage)?;
             }
         }
@@ -253,6 +291,8 @@ fn notify_and_restart(
         guard.led_trigger(LedPattern::FastBlink)?;
     }
 
+    // Clear Wi‑Fi creds to force the setup portal next boot (same user-facing behavior as
+    // `wm.resetSettings()` in the Arduino firmware).
     WifiCredentials::clear(nvs)?;
     storage.flush()?;
 
@@ -282,6 +322,9 @@ fn current_epoch() -> u64 {
 }
 
 struct SharedState {
+    // This is intentionally small: most runtime state is owned by `Controller`.
+    // Any field added here becomes "global shared mutable state" (like C++ globals), so keep it
+    // to cross-cutting telemetry/signals only.
     controller: Controller<XorShift32>,
     rssi: i32,
     reset_requested: bool,

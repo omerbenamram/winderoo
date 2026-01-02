@@ -28,6 +28,8 @@ impl Storage {
     }
 
     pub(super) fn load_or_init(&self) -> Result<StoredSettings, Esp32Error> {
+        // Be liberal in what we accept: a missing or corrupt settings file should not brick boot.
+        // C++ behaved similarly by falling back to default runtime vars.
         if let Ok(contents) = fs::read_to_string(&self.settings_path) {
             if let Ok(settings) = serde_json::from_str::<StoredSettings>(&contents) {
                 return Ok(settings);
@@ -39,20 +41,25 @@ impl Storage {
     }
 
     pub(super) fn save(&self, settings: &StoredSettings) -> Result<(), Esp32Error> {
+        // Pretty JSON makes on-device debugging easier when inspecting LittleFS contents.
         let json = serde_json::to_string_pretty(settings)?;
         fs::write(&self.settings_path, json)?;
         Ok(())
     }
 
     pub(super) fn flush(&self) -> Result<(), Esp32Error> {
+        // Placeholder hook: ESP-IDF/LittleFS typically flushes on close, but we keep a named
+        // "flush" step so the restart path can express intent (mirrors C++: stop server, end FS).
         Ok(())
     }
 
     pub(super) fn resolve_asset(&self, uri: &str) -> Option<StaticAsset> {
+        // Strip query string so `index.html?v=...` still resolves.
         let mut path = uri.split('?').next().unwrap_or("").trim_start_matches('/');
         if path.is_empty() {
             path = "index.html";
         }
+        // Basic directory traversal guard (the HTTP server is exposed on the LAN).
         if path.contains("..") {
             return None;
         }
@@ -62,6 +69,8 @@ impl Storage {
             return Some(asset);
         }
 
+        // Support pre-compressed assets (e.g. `app.js.gz`) without requiring the client to send
+        // `Accept-Encoding`. This keeps the firmware UI fast on constrained hardware.
         let gz_candidate = PathBuf::from(format!("{}.gz", candidate.display()));
         if let Some(asset) = StaticAsset::from_path(&gz_candidate, true) {
             return Some(asset);
@@ -101,6 +110,8 @@ impl StaticAsset {
             "gz" => "application/octet-stream",
             _ => "application/octet-stream",
         };
+        // Match the Arduino firmware caching intent:
+        // long cache for immutable assets (css/js), no-cache for HTML so new UI versions load.
         let cache_control = if ext == "js" || ext == "css" {
             "max-age=31536000"
         } else {

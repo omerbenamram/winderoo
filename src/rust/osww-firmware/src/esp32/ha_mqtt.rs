@@ -36,6 +36,9 @@ impl HomeAssistant {
         shared: Arc<Mutex<SharedState>>,
         api_version: &str,
     ) -> Result<Option<Self>, Esp32Error> {
+        // Legacy firmware hard-coded HA broker creds in `main.cpp`.
+        // Rust uses env/build-time env so we can ship the same firmware to multiple devices
+        // without baking secrets into the source tree.
         let broker = env_or_build("HOME_ASSISTANT_BROKER", HA_BROKER_ENV).unwrap_or_default();
         if broker.is_empty() {
             warn!("HOME_ASSISTANT_BROKER not set; skipping MQTT");
@@ -44,8 +47,12 @@ impl HomeAssistant {
 
         let username = env_or_build("HOME_ASSISTANT_USERNAME", HA_USERNAME_ENV);
         let password = env_or_build("HOME_ASSISTANT_PASSWORD", HA_PASSWORD_ENV);
+        // C++: `device.setUniqueId(mac, sizeof(mac))`.
+        // We embed the last MAC bytes into the device_id to avoid topic collisions.
         let device_id = format!("winderoo-{}", mac_suffix());
 
+        // MQTT callbacks run on an ESP-IDF task. Keep them tiny:
+        // parse command payloads and push them into a channel, then apply them from the main loop.
         let (command_tx, command_rx) = mpsc::channel();
         let mut config = MqttClientConfiguration::default();
         config.client_id = Some("winderoo");
@@ -61,6 +68,7 @@ impl HomeAssistant {
                 ..
             } = event.payload()
             {
+                // Only do lightweight work here. Any controller mutation happens later in `drain_commands`.
                 if let Some(command) = HaCommand::parse(topic, data) {
                     let _ = tx.send(command);
                 }
@@ -105,13 +113,13 @@ impl HomeAssistant {
         &mut self,
         shared: &Arc<Mutex<SharedState>>,
     ) -> Result<(), Esp32Error> {
-        let guard = shared.lock().map_err(|_| Esp32Error::Lock)?;
-        let state_messages = home_assistant::state_messages(
-            &self.device_id,
-            &guard.controller.state,
-            guard.rssi,
-            current_epoch(),
-        );
+        // Snapshot controller state under the lock, but publish outside the lock.
+        // Publishing can allocate and may block depending on the client/buffer state.
+        let now = current_epoch();
+        let state_messages = {
+            let guard = shared.lock().map_err(|_| Esp32Error::Lock)?;
+            home_assistant::state_messages(&self.device_id, &guard.controller.state, guard.rssi, now)
+        };
         for (topic, payload) in state_messages {
             let _ = self
                 .client
@@ -126,6 +134,8 @@ impl HomeAssistant {
         hardware: &Arc<Mutex<Hardware>>,
         storage: &Arc<Storage>,
     ) -> Result<(), Esp32Error> {
+        // Applied from the main loop (not from the MQTT callback) so we reuse the same lock/side-effect
+        // pipeline as HTTP and the tick loop.
         while let Ok(cmd) = self.command_rx.try_recv() {
             let now = current_epoch();
             let events = {

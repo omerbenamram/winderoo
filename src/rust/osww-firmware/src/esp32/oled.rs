@@ -26,6 +26,20 @@ use super::Esp32Error;
 
 const OLED_ADDR: u8 = 0x3C;
 
+// Match the Arduino firmware's configurable OLED behavior:
+// - `OLED_INVERT_SCREEN`
+// - `OLED_ROTATE_SCREEN_180`
+//
+// In Rust we expose these as Cargo features so you can flip them at build time without editing code:
+// - `oled-invert`
+// - `oled-rotate-180`
+const OLED_INVERT_SCREEN: bool = cfg!(feature = "oled-invert");
+const OLED_ROTATION: DisplayRotation = if cfg!(feature = "oled-rotate-180") {
+    DisplayRotation::Rotate180
+} else {
+    DisplayRotation::Rotate0
+};
+
 pub(super) struct OledDisplay {
     display: Ssd1306<
         I2CInterface<I2cDriver<'static>>,
@@ -36,11 +50,12 @@ pub(super) struct OledDisplay {
 
 impl OledDisplay {
     pub(super) fn new(i2c: I2cDriver<'static>) -> Result<Self, Esp32Error> {
+        // Matches the legacy Arduino firmware default: SSD1306 at 0x3C, 128x64, rotation 0.
         let interface = I2CDisplayInterface::new_custom_address(i2c, OLED_ADDR);
-        let mut display = Ssd1306::new(interface, DisplaySize128x64, DisplayRotation::Rotate0)
+        let mut display = Ssd1306::new(interface, DisplaySize128x64, OLED_ROTATION)
             .into_buffered_graphics_mode();
         display.init()?;
-        display.set_invert(false)?;
+        display.set_invert(OLED_INVERT_SCREEN)?;
         display.flush()?;
         Ok(Self { display })
     }
@@ -52,6 +67,7 @@ impl OledDisplay {
     }
 
     pub(super) fn draw_static(&mut self, title: &str) -> Result<(), Esp32Error> {
+        // Same layout as C++ `drawStaticGUI(...)`: header, separators, and fixed labels.
         self.display.clear(BinaryColor::Off)?;
 
         let text_style = MonoTextStyleBuilder::new()
@@ -79,7 +95,11 @@ impl OledDisplay {
         Ok(())
     }
 
-    pub(super) fn draw_dynamic(&mut self, state: &RuntimeState, rssi: i32) -> Result<(), Esp32Error> {
+    pub(super) fn draw_dynamic(
+        &mut self,
+        state: &RuntimeState,
+        rssi: i32,
+    ) -> Result<(), Esp32Error> {
         let small_style = MonoTextStyleBuilder::new()
             .font(&FONT_6X10)
             .text_color(BinaryColor::On)
@@ -89,6 +109,8 @@ impl OledDisplay {
             .text_color(BinaryColor::On)
             .build();
 
+        // We do small targeted clears instead of wiping the whole screen:
+        // less flicker + less work per frame while keeping the layout stable.
         Rectangle::new(Point::new(8, 25), Size::new(54, 25))
             .into_styled(PrimitiveStyle::with_fill(BinaryColor::Off))
             .draw(&mut self.display)?;
@@ -133,6 +155,8 @@ impl OledDisplay {
         rssi: i32,
         style: embedded_graphics::mono_font::MonoTextStyle<'_, BinaryColor>,
     ) -> Result<(), Esp32Error> {
+        // Port of the C++ "cell reception" indicator. The RSSI→bars mapping is unit-tested in
+        // `crate::oled_ui` so this module stays mostly drawing code.
         Triangle::new(Point::new(4, 54), Point::new(10, 54), Point::new(7, 58))
             .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
             .draw(&mut self.display)?;
@@ -169,6 +193,7 @@ impl OledDisplay {
             .draw(&mut self.display)?;
 
         if state.timer.enabled {
+            // Mirrors the legacy "TIMER HH:MM" footer when the timer is armed.
             let text = format!(
                 "TIMER {:02}:{:02}",
                 state.timer.start_time.hour, state.timer.start_time.minute
@@ -179,6 +204,7 @@ impl OledDisplay {
     }
 
     pub(super) fn draw_notification(&mut self, message: &str) -> Result<(), Esp32Error> {
+        // Port of the C++ notification "invert header briefly" effect.
         Rectangle::new(Point::new(0, 0), Size::new(128, 14))
             .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
             .draw(&mut self.display)?;
@@ -210,4 +236,3 @@ impl OledDisplay {
         Ok(())
     }
 }
-

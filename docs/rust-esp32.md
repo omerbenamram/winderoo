@@ -34,6 +34,8 @@ cargo build -Z build-std=std,panic_abort -Z build-std-features=panic_immediate_a
 
 Optional features (match the C++ flags):
 - `oled` (SSD1306 I2C display)
+- `oled-invert` (invert OLED pixels; matches C++ `OLED_INVERT_SCREEN`)
+- `oled-rotate-180` (rotate OLED 180°; matches C++ `OLED_ROTATE_SCREEN_180`)
 - `pwm-motor` (LEDC PWM motor control)
 - `home-assistant` (MQTT discovery + control)
 

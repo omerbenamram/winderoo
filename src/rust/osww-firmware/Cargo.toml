@@ -27,6 +27,10 @@ oled = [
     "dep:embedded-graphics",
     "dep:ssd1306",
 ]
+# OLED config toggles (match the C++ `OLED_INVERT_SCREEN` / `OLED_ROTATE_SCREEN_180` knobs).
+# These are no-ops unless the `esp32` runtime is built with `oled` support.
+oled-invert = ["oled"]
+oled-rotate-180 = ["oled"]
 home-assistant = []
 pwm-motor = []
 

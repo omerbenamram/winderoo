@@ -3,6 +3,7 @@
 //! This module owns the ESP-IDF Wi‑Fi drivers and the small HTTP server used as a captive portal.
 //! Parsing + HTML lives in `crate::wifi_portal` so it can be unit-tested on a host.
 
+use crate::hardware::LedPattern;
 use crate::wifi_portal;
 use embedded_svc::http::headers::content_type;
 use embedded_svc::http::Method;
@@ -29,6 +30,8 @@ pub(super) struct WifiCredentials {
 
 impl WifiCredentials {
     pub(super) fn load(nvs: &EspDefaultNvsPartition) -> Result<Option<Self>, Esp32Error> {
+        // Separate namespace so we can wipe Wi‑Fi creds on a "factory reset" without touching
+        // other NVS data. This mirrors WiFiManager's persisted SSID/password behavior in C++.
         let nvs = EspNvs::new(nvs.clone(), "wifi", true)?;
         let mut ssid_buf = [0u8; 33];
         let mut pass_buf = [0u8; 65];
@@ -65,6 +68,8 @@ pub(super) fn connect_wifi(
     wifi: &mut BlockingWifi<EspWifi>,
     creds: &WifiCredentials,
 ) -> Result<(), Esp32Error> {
+    // Equivalent to the C++ `wm.autoConnect(...)` "STA mode" path:
+    // configure the client, start Wi‑Fi, and block until the interface is up.
     let mut client_cfg = ClientConfiguration::default();
     client_cfg.ssid = to_heapless(&creds.ssid)?;
     client_cfg.password = to_heapless(&creds.password)?;
@@ -87,11 +92,12 @@ pub(super) fn start_config_portal(
     wifi: &mut BlockingWifi<EspWifi>,
     storage: &Arc<Storage>,
     hardware: &Arc<Mutex<Hardware>>,
-    shared: &Arc<Mutex<SharedState>>,
+    _shared: &Arc<Mutex<SharedState>>,
     nvs: &EspDefaultNvsPartition,
 ) -> Result<(), Esp32Error> {
     info!("starting wifi config portal");
 
+    // Open AP (no auth) to mimic the "Winderoo Setup" onboarding experience from WiFiManager.
     let mut ap_cfg = AccessPointConfiguration::default();
     ap_cfg.ssid = to_heapless(AP_SSID)?;
     ap_cfg.auth_method = AuthMethod::None;
@@ -100,6 +106,8 @@ pub(super) fn start_config_portal(
     wifi.set_configuration(&Configuration::AccessPoint(ap_cfg))?;
     wifi.start()?;
 
+    // Simple shared flag toggled by the POST handler.
+    // We keep it as a mutex-protected bool so it can be safely touched from the HTTP task.
     let portal_state = Arc::new(Mutex::new(false));
     let portal_state_handler = portal_state.clone();
     let nvs_handler = nvs.clone();
@@ -151,10 +159,27 @@ pub(super) fn start_config_portal(
 
     loop {
         if *portal_state.lock().map_err(|_| Esp32Error::Lock)? {
-            super::notify_and_restart(shared, hardware, storage, nvs)?;
+            // After saving creds we restart *without* wiping Wi‑Fi, so the next boot can connect.
+            // (Contrast: the `/api/reset` path intentionally clears creds to force re-onboarding.)
+            restart_after_portal_save(hardware, storage)?;
         }
         thread::sleep(Duration::from_millis(200));
     }
+}
+
+fn restart_after_portal_save(
+    hardware: &Arc<Mutex<Hardware>>,
+    storage: &Arc<Storage>,
+) -> Result<(), Esp32Error> {
+    {
+        let mut hw = hardware.lock().map_err(|_| Esp32Error::Lock)?;
+        hw.display_notification("Restarting")?;
+        hw.led_trigger(LedPattern::SlowBlink)?;
+    }
+    storage.flush()?;
+    unsafe { esp_idf_sys::esp_restart() };
+    #[allow(unreachable_code)]
+    Ok(())
 }
 
 fn to_heapless<const N: usize>(value: &str) -> Result<HeaplessString<N>, Esp32Error> {
