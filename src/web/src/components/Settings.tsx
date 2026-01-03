@@ -569,7 +569,7 @@ export function Settings() {
           .control-buttons {
             grid-template-columns: 1fr;
           }
-          
+
           .schedule-row {
             flex-direction: column;
             align-items: flex-start;

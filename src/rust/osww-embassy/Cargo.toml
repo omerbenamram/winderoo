@@ -14,6 +14,7 @@ heapless = "0.9"
 dns-protocol = { version = "0.1.2", default-features = false }
 serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
 serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
+log = { version = "0.4", default-features = false }
 picoserve = { version = "0.17.1", default-features = false, features = ["alloc"] }
 ssd1306 = { version = "0.10", default-features = false, features = ["graphics"], optional = true }
 embedded-graphics = { version = "0.8.1", default-features = false, optional = true }

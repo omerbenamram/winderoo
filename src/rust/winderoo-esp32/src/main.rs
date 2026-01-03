@@ -4,10 +4,14 @@
 
 extern crate alloc;
 
+// Embed ESP-IDF app descriptor for bootloader compatibility.
+esp_bootloader_esp_idf::esp_app_desc!();
+
 // Keep panic + exception handlers linked in.
 use esp_backtrace as _;
 
 use core::cell::RefCell;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use embassy_executor::Spawner;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
@@ -27,7 +31,7 @@ use esp_hal::time::Rate;
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::{rng::Rng, Config as HalConfig};
 use esp_println::logger::init_logger;
-use log::info;
+use log::{debug, info, warn};
 
 use esp_storage::FlashStorage;
 
@@ -55,6 +59,53 @@ macro_rules! mk_static {
         static STATIC_CELL: static_cell::StaticCell<$t> = static_cell::StaticCell::new();
         STATIC_CELL.uninit().write($val)
     }};
+}
+
+/// Version string exposed by the HTTP API + status snapshots.
+const API_VERSION: &str = "4.0.1";
+
+/// Heap size used for alloc-heavy HTTP + JSON parsing.
+const HEAP_BYTES: usize = 64 * 1024;
+
+static BOOT_STAGE: AtomicU32 = AtomicU32::new(0);
+
+macro_rules! boot {
+    ($($arg:tt)*) => {{
+        let n = BOOT_STAGE.fetch_add(1, Ordering::Relaxed) + 1;
+        log::info!("[BOOT {:02}] {}", n, format_args!($($arg)*));
+    }};
+}
+
+macro_rules! spawn_task {
+    ($spawner:expr, $name:expr, $token:expr) => {{
+        match $spawner.spawn($token) {
+            Ok(()) => log::info!("[SPAWN] {}", $name),
+            Err(err) => {
+                log::error!("[SPAWN] {} FAILED: {:?}", $name, err);
+                panic!("spawn failed: {}", $name);
+            }
+        }
+    }};
+}
+
+fn log_level_from_env() -> log::LevelFilter {
+    match option_env!("WINDEROO_LOG") {
+        Some("trace") | Some("TRACE") => log::LevelFilter::Trace,
+        Some("debug") | Some("DEBUG") => log::LevelFilter::Debug,
+        Some("info") | Some("INFO") => log::LevelFilter::Info,
+        Some("warn") | Some("WARN") | Some("warning") | Some("WARNING") => log::LevelFilter::Warn,
+        Some("error") | Some("ERROR") => log::LevelFilter::Error,
+        Some("off") | Some("OFF") => log::LevelFilter::Off,
+        Some(_) | None => log::LevelFilter::Info,
+    }
+}
+
+/// Timestamp provider for esp-println logger (milliseconds since boot).
+#[no_mangle]
+pub extern "Rust" fn _esp_println_timestamp() -> u64 {
+    esp_hal::time::Instant::now()
+        .duration_since_epoch()
+        .as_millis()
 }
 
 /// Runtime command queue depth.
@@ -200,13 +251,16 @@ where
 
 #[embassy_executor::task(pool_size = 2)]
 async fn net_task(
+    name: &'static str,
     mut runner: embassy_net::Runner<'static, esp_radio::wifi::WifiDevice<'static>>,
 ) -> ! {
+    info!("{}: network runner task starting", name);
     runner.run().await
 }
 
 #[embassy_executor::task]
 async fn wifi_task(
+    name: &'static str,
     manager: WifiManager<
         'static,
         winderoo_embassy::esp32::EspWifiControl<'static>,
@@ -214,11 +268,13 @@ async fn wifi_task(
         WIFI_QUEUE_DEPTH,
     >,
 ) -> ! {
+    info!("{}: Wi-Fi manager task starting", name);
     manager.run().await
 }
 
 #[embassy_executor::task]
 async fn controller_task(
+    name: &'static str,
     task: ControllerTask<
         'static,
         XorShift32,
@@ -231,11 +287,13 @@ async fn controller_task(
         RUNTIME_QUEUE_DEPTH,
     >,
 ) -> ! {
+    info!("{}: controller task starting", name);
     task.run().await
 }
 
 #[embassy_executor::task]
 async fn system_task(
+    name: &'static str,
     task: winderoo_embassy::system::SystemTask<
         'static,
         NorFlashSettingsStore<FlashPartition<'static>>,
@@ -244,14 +302,20 @@ async fn system_task(
         winderoo_embassy::esp32::EspReset,
     >,
 ) -> ! {
+    info!("{}: system task starting", name);
     task.run().await
 }
 
 #[embassy_executor::task]
-async fn dhcp_server_task(stack: embassy_net::Stack<'static>) -> ! {
+async fn dhcp_server_task(name: &'static str, stack: embassy_net::Stack<'static>) -> ! {
     use embassy_time::Timer;
     use esp_hal_dhcp_server::simple_leaser::SimpleDhcpLeaser;
     use esp_hal_dhcp_server::structs::DhcpServerConfig;
+
+    info!("{}: waiting for AP stack config", name);
+    // Wait for AP stack to be configured before starting DHCP server.
+    stack.wait_config_up().await;
+    info!("{}: AP stack config up; starting DHCP server", name);
 
     const AP_DNS: [core::net::Ipv4Addr; 1] = [core::net::Ipv4Addr::new(192, 168, 4, 1)];
 
@@ -273,6 +337,7 @@ async fn dhcp_server_task(stack: embassy_net::Stack<'static>) -> ! {
 
     // Run forever. If we ever need to stop, we can call `esp_hal_dhcp_server::dhcp_close()`.
     let _ = esp_hal_dhcp_server::run_dhcp_server(stack, config, &mut leaser).await;
+    warn!("{}: DHCP server returned unexpectedly; staying alive", name);
 
     // Should never return, but keep the task type as `!` anyway.
     loop {
@@ -284,8 +349,12 @@ async fn dhcp_server_task(stack: embassy_net::Stack<'static>) -> ! {
 ///
 /// Responds to most DNS queries with `192.168.4.1`, so arbitrary hostnames resolve to the device.
 #[embassy_executor::task]
-async fn dns_captive_task(stack: embassy_net::Stack<'static>) -> ! {
+async fn dns_captive_task(name: &'static str, stack: embassy_net::Stack<'static>) -> ! {
     use embassy_net::udp::{PacketMetadata, UdpSocket};
+
+    info!("{}: waiting for AP stack config", name);
+    // Wait for AP stack to be configured before binding DNS socket.
+    stack.wait_config_up().await;
 
     const DNS_PORT: u16 = 53;
     const AP_IP: [u8; 4] = [192, 168, 4, 1];
@@ -305,6 +374,7 @@ async fn dns_captive_task(stack: embassy_net::Stack<'static>) -> ! {
         &mut sock_tx,
     );
     socket.bind(DNS_PORT).expect("DNS bind failed");
+    info!("{}: captive DNS bound on UDP:{}", name, DNS_PORT);
 
     loop {
         let (n, remote) = match socket.recv_from(&mut query).await {
@@ -312,9 +382,11 @@ async fn dns_captive_task(stack: embassy_net::Stack<'static>) -> ! {
             Err(_) => continue,
         };
 
-        if let Some(resp_len) =
-            winderoo_embassy::captive_portal::build_dns_wildcard_response(&query[..n], &mut response, AP_IP)
-        {
+        if let Some(resp_len) = winderoo_embassy::captive_portal::build_dns_wildcard_response(
+            &query[..n],
+            &mut response,
+            AP_IP,
+        ) {
             let _ = socket.send_to(&response[..resp_len], remote).await;
         }
     }
@@ -322,7 +394,7 @@ async fn dns_captive_task(stack: embassy_net::Stack<'static>) -> ! {
 
 #[cfg(feature = "mdns")]
 #[embassy_executor::task]
-async fn mdns_task(stack: embassy_net::Stack<'static>) -> ! {
+async fn mdns_task(name: &'static str, stack: embassy_net::Stack<'static>) -> ! {
     use core::net::{Ipv4Addr, Ipv6Addr};
 
     use edge_mdns::host::{Host, Service, ServiceAnswers};
@@ -344,6 +416,7 @@ async fn mdns_task(stack: embassy_net::Stack<'static>) -> ! {
         edge_nal_embassy::UdpBuffers::new();
     let udp = edge_nal_embassy::Udp::new(stack, &udp_buffers);
 
+    info!("{}: task starting", name);
     loop {
         stack.wait_config_up().await;
 
@@ -351,12 +424,13 @@ async fn mdns_task(stack: embassy_net::Stack<'static>) -> ! {
             .config_v4()
             .map(|config| config.address.address())
             .unwrap_or(Ipv4Addr::UNSPECIFIED);
+        info!("{}: stack up; advertising mDNS on {}", name, ipv4);
 
         let mut socket =
             match bind(&udp, IPV4_DEFAULT_SOCKET, Some(Ipv4Addr::UNSPECIFIED), None).await {
                 Ok(socket) => socket,
                 Err(err) => {
-                    log::warn!("mDNS bind failed: {:?}", err.erase());
+                    warn!("{}: mDNS bind failed: {:?}", name, err.erase());
                     Timer::after(Duration::from_secs(5)).await;
                     continue;
                 }
@@ -394,13 +468,16 @@ async fn mdns_task(stack: embassy_net::Stack<'static>) -> ! {
         let handler = HostAnswersMdnsHandler::new(ServiceAnswers::new(&host, &service));
 
         if let Err(err) = mdns.run(handler).await {
-            log::warn!("mDNS stopped: {:?}", err.erase());
+            warn!("{}: mDNS stopped: {:?}", name, err.erase());
             Timer::after(Duration::from_secs(1)).await;
         }
     }
 }
 
-#[embassy_executor::task(pool_size = 2)]
+// NOTE: `picoserve` on Embassy serves **one TCP connection per task**.
+// `embassy-net` rejects incoming connections when no socket is listening (no backlog),
+// so we run multiple HTTP tasks for the STA stack to handle browsers fetching assets in parallel.
+#[embassy_executor::task(pool_size = 4)]
 async fn http_server_task(
     name: &'static str,
     stack: embassy_net::Stack<'static>,
@@ -415,21 +492,35 @@ async fn http_server_task(
 ) -> ! {
     use picoserve::{Config, NoGracefulShutdown, Server, Timeouts};
 
+    info!("{}: HTTP task starting; waiting for network config", name);
+    // Wait for network stack to be configured before binding the HTTP server.
+    // Without this, picoserve spins in a tight loop retrying to bind/accept.
+    stack.wait_config_up().await;
+    info!(
+        "{}: stack up (ipv4={:?}); starting HTTP server on TCP:{}",
+        name,
+        stack.config_v4().map(|cfg| cfg.address.address()),
+        HTTP_PORT
+    );
+
     let api_state =
         winderoo_embassy::http::ApiState::new(status_cache, runtime_sender, Some(wifi_sender));
     let router = winderoo_embassy::http::build_router(api_state, name == "http-ap");
 
     let config = Config::new(Timeouts {
         start_read_request: Some(Duration::from_secs(10)),
-        persistent_start_read_request: Some(Duration::from_secs(10)),
+        // Keep-alive allows a browser to reuse one TCP connection for multiple assets.
+        // Keep this short so sockets don't get hogged if the browser goes idle.
+        persistent_start_read_request: Some(Duration::from_secs(2)),
         read_request: Some(Duration::from_secs(10)),
-        write: Some(Duration::from_secs(10)),
+        // app.js.gz is ~16KB; much smaller than the old Angular bundle.
+        write: Some(Duration::from_secs(60)),
     })
-    .close_connection_after_response();
+    .keep_connection_alive();
 
     let mut http_buffer = [0u8; 2048];
     let mut tcp_rx_buffer = [0u8; 2048];
-    let mut tcp_tx_buffer = [0u8; 2048];
+    let mut tcp_tx_buffer = [0u8; 4096];
 
     let shutdown: NoGracefulShutdown = Server::new(&router, &config, &mut http_buffer)
         .listen_and_serve(
@@ -446,6 +537,7 @@ async fn http_server_task(
 
 #[embassy_executor::task]
 async fn external_button_task(
+    name: &'static str,
     mut button: Input<'static>,
     status_cache: &'static StatusCache,
     runtime_sender: embassy_sync::channel::Sender<
@@ -458,12 +550,16 @@ async fn external_button_task(
     use embassy_time::Timer;
     use winderoo_embassy::tasks::RuntimeCommand;
 
+    info!("{}: task starting", name);
     loop {
         // Rising edge = pressed (assuming pull-down).
         let _ = button.wait_for_rising_edge().await;
         let enabled = status_cache.snapshot().winder_enabled;
-        let _ = runtime_sender
-            .send(RuntimeCommand::ApplyPower(!enabled))
+        let new_enabled = !enabled;
+        info!("{}: button press -> ApplyPower({})", name, new_enabled);
+        // embassy_sync::channel::Sender::send() is infallible (waits for space)
+        runtime_sender
+            .send(RuntimeCommand::ApplyPower(new_enabled))
             .await;
 
         // Debounce.
@@ -473,24 +569,47 @@ async fn external_button_task(
 
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
+    // Initialize serial logger as early as possible so any boot issues show up on UART.
+    let log_level = log_level_from_env();
+    init_logger(log_level);
+    boot!(
+        "{} v{} (api {})",
+        env!("CARGO_PKG_NAME"),
+        env!("CARGO_PKG_VERSION"),
+        API_VERSION
+    );
+    boot!(
+        "features: mdns={}, oled={}, home-assistant={}, pwm-motor={}",
+        cfg!(feature = "mdns"),
+        cfg!(feature = "oled"),
+        cfg!(feature = "home-assistant"),
+        cfg!(feature = "pwm-motor")
+    );
+    boot!("log level: {:?}", log_level);
+
+    boot!("initializing HAL (cpu_clock=max)");
     let config = HalConfig::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
+    boot!("HAL initialized");
 
     // Heap for alloc-heavy HTTP + JSON parsing.
-    esp_alloc::heap_allocator!(size: 96 * 1024);
-
-    init_logger(log::LevelFilter::Info);
-    info!("winderoo-esp32 booting");
+    // Keep this small to leave room for the stack. 64KB is usually sufficient.
+    boot!("initializing heap allocator ({} bytes)", HEAP_BYTES);
+    esp_alloc::heap_allocator!(size: HEAP_BYTES);
 
     // Start RTOS scheduler + time driver (required by esp-radio + embassy).
+    boot!("starting RTOS scheduler + embassy time (TIMG0.timer0)");
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0);
+    boot!("RTOS started");
 
     // Initialize Wi-Fi/BLE controller.
+    boot!("initializing esp-radio controller");
     let radio_init = &*mk_static!(
         esp_radio::Controller<'static>,
         esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller")
     );
+    boot!("esp-radio controller initialized");
 
     // RNG for network seeds + controller RNG seed.
     let mut rng = Rng::new();
@@ -531,12 +650,21 @@ async fn main(spawner: Spawner) -> ! {
         net_seed_ap,
     );
 
-    spawner.spawn(net_task(sta_runner)).ok();
-    spawner.spawn(net_task(ap_runner)).ok();
-    spawner.spawn(dhcp_server_task(ap_stack)).ok();
-    spawner.spawn(dns_captive_task(ap_stack)).ok();
+    boot!("spawning network tasks");
+    spawn_task!(spawner, "net-sta", net_task("net-sta", sta_runner));
+    spawn_task!(spawner, "net-ap", net_task("net-ap", ap_runner));
+    spawn_task!(
+        spawner,
+        "dhcp-server",
+        dhcp_server_task("dhcp-server", ap_stack)
+    );
+    spawn_task!(
+        spawner,
+        "dns-captive",
+        dns_captive_task("dns-captive", ap_stack)
+    );
     #[cfg(feature = "mdns")]
-    spawner.spawn(mdns_task(sta_stack)).ok();
+    spawn_task!(spawner, "mdns", mdns_task("mdns", sta_stack));
 
     // Shared flash.
     let mut flash = FlashStorage::new(peripherals.FLASH);
@@ -549,6 +677,12 @@ async fn main(spawner: Spawner) -> ! {
 
     let flash_capacity = shared_flash.lock(|cell| ReadNorFlash::capacity(&*cell.borrow()));
     let storage_base = flash_capacity.checked_sub(STORAGE_TOTAL_BYTES).unwrap_or(0) as u32;
+    boot!(
+        "flash capacity={} bytes; reserved storage=[0x{:08x}..0x{:08x})",
+        flash_capacity,
+        storage_base,
+        storage_base + STORAGE_TOTAL_BYTES as u32
+    );
 
     // Flash partitions for settings + Wi-Fi credentials.
     let settings_part = FlashPartition::new(shared_flash, storage_base, SETTINGS_BYTES as u32);
@@ -570,7 +704,7 @@ async fn main(spawner: Spawner) -> ! {
     let rng = XorShift32::new(controller_seed);
     let controller = Controller::new(runtime_state, rng);
 
-    let initial_snapshot = controller.status_snapshot(0, -100, "4.0.1");
+    let initial_snapshot = controller.status_snapshot(0, -100, API_VERSION);
     let status_cache: &'static StatusCache =
         &*mk_static!(StatusCache, StatusCache::new(initial_snapshot));
     let wifi_status: &'static WifiStatus = &*mk_static!(WifiStatus, WifiStatus::new());
@@ -672,7 +806,7 @@ async fn main(spawner: Spawner) -> ! {
         status_cache,
         wifi_status,
         RUNTIME_COMMANDS.receiver(),
-        "4.0.1",
+        API_VERSION,
         Duration::from_millis(500),
     );
 
@@ -724,31 +858,61 @@ async fn main(spawner: Spawner) -> ! {
 
     // HTTP servers (one per stack). They can share the same state + channels.
     let wifi_sender = WifiCommandSender::new(WIFI_COMMANDS.sender());
-    spawner
-        .spawn(external_button_task(button, status_cache, runtime_sender))
-        .ok();
-    spawner
-        .spawn(http_server_task(
+    boot!("spawning HTTP + UI tasks");
+    spawn_task!(
+        spawner,
+        "external-button",
+        external_button_task("external-button", button, status_cache, runtime_sender)
+    );
+    spawn_task!(
+        spawner,
+        "http-sta-0",
+        http_server_task(
             "http-sta",
             sta_stack,
             status_cache,
             runtime_sender,
             wifi_sender.clone(),
-        ))
-        .ok();
-    spawner
-        .spawn(http_server_task(
+        )
+    );
+    spawn_task!(
+        spawner,
+        "http-sta-1",
+        http_server_task(
+            "http-sta",
+            sta_stack,
+            status_cache,
+            runtime_sender,
+            wifi_sender.clone(),
+        )
+    );
+    spawn_task!(
+        spawner,
+        "http-sta-2",
+        http_server_task(
+            "http-sta",
+            sta_stack,
+            status_cache,
+            runtime_sender,
+            wifi_sender.clone(),
+        )
+    );
+    spawn_task!(
+        spawner,
+        "http-ap",
+        http_server_task(
             "http-ap",
             ap_stack,
             status_cache,
             runtime_sender,
             wifi_sender.clone(),
-        ))
-        .ok();
+        )
+    );
 
     #[cfg(feature = "home-assistant")]
     {
         if HOME_ASSISTANT_BROKER != "YOUR_HOME_ASSISTANT_IP" {
+            boot!("Home Assistant enabled (broker={})", HOME_ASSISTANT_BROKER);
             use embassy_ha::{
                 ButtonClass, ButtonConfig, CommandPolicy, DeviceConfig, EntityCommonConfig,
                 NumberConfig, NumberMode, SelectConfig, SensorClass, SensorConfig, StateClass,
@@ -1078,173 +1242,172 @@ async fn main(spawner: Spawner) -> ! {
                 },
             );
 
-            spawner
-                .spawn(home_assistant::ha_run_task(
-                    sta_stack,
-                    device,
-                    HOME_ASSISTANT_BROKER,
-                ))
-                .ok();
-            spawner
-                .spawn(home_assistant::ha_power_task(
-                    status_cache,
-                    runtime_sender,
-                    power,
-                ))
-                .ok();
-            spawner
-                .spawn(home_assistant::ha_timer_enabled_task(
-                    status_cache,
-                    runtime_sender,
-                    timer_enabled,
-                ))
-                .ok();
-            spawner
-                .spawn(home_assistant::ha_oled_task(
-                    status_cache,
-                    runtime_sender,
-                    oled,
-                ))
-                .ok();
-            spawner
-                .spawn(home_assistant::ha_start_button_task(
-                    status_cache,
-                    runtime_sender,
-                    start,
-                ))
-                .ok();
-            spawner
-                .spawn(home_assistant::ha_stop_button_task(
-                    status_cache,
-                    runtime_sender,
-                    stop,
-                ))
-                .ok();
-            spawner
-                .spawn(home_assistant::ha_rpd_task(
-                    status_cache,
-                    runtime_sender,
-                    rpd,
-                ))
-                .ok();
-            spawner
-                .spawn(home_assistant::ha_direction_select_task(
-                    status_cache,
-                    runtime_sender,
-                    direction,
-                ))
-                .ok();
-            spawner
-                .spawn(home_assistant::ha_timer_hour_task(
-                    status_cache,
-                    runtime_sender,
-                    hour,
-                ))
-                .ok();
-            spawner
-                .spawn(home_assistant::ha_timer_minutes_task(
-                    status_cache,
-                    runtime_sender,
-                    minutes,
-                ))
-                .ok();
-            spawner
-                .spawn(home_assistant::ha_custom_wind_duration_task(
+            spawn_task!(
+                spawner,
+                "ha-run",
+                home_assistant::ha_run_task(sta_stack, device, HOME_ASSISTANT_BROKER,)
+            );
+            spawn_task!(
+                spawner,
+                "ha-power",
+                home_assistant::ha_power_task(status_cache, runtime_sender, power,)
+            );
+            spawn_task!(
+                spawner,
+                "ha-timer-enabled",
+                home_assistant::ha_timer_enabled_task(status_cache, runtime_sender, timer_enabled,)
+            );
+            spawn_task!(
+                spawner,
+                "ha-oled",
+                home_assistant::ha_oled_task(status_cache, runtime_sender, oled,)
+            );
+            spawn_task!(
+                spawner,
+                "ha-start-button",
+                home_assistant::ha_start_button_task(status_cache, runtime_sender, start,)
+            );
+            spawn_task!(
+                spawner,
+                "ha-stop-button",
+                home_assistant::ha_stop_button_task(status_cache, runtime_sender, stop,)
+            );
+            spawn_task!(
+                spawner,
+                "ha-rpd",
+                home_assistant::ha_rpd_task(status_cache, runtime_sender, rpd,)
+            );
+            spawn_task!(
+                spawner,
+                "ha-direction",
+                home_assistant::ha_direction_select_task(status_cache, runtime_sender, direction,)
+            );
+            spawn_task!(
+                spawner,
+                "ha-timer-hour",
+                home_assistant::ha_timer_hour_task(status_cache, runtime_sender, hour,)
+            );
+            spawn_task!(
+                spawner,
+                "ha-timer-minutes",
+                home_assistant::ha_timer_minutes_task(status_cache, runtime_sender, minutes,)
+            );
+            spawn_task!(
+                spawner,
+                "ha-custom-wind-duration",
+                home_assistant::ha_custom_wind_duration_task(
                     status_cache,
                     runtime_sender,
                     custom_wind_duration,
-                ))
-                .ok();
-            spawner
-                .spawn(home_assistant::ha_custom_wind_pause_task(
+                )
+            );
+            spawn_task!(
+                spawner,
+                "ha-custom-wind-pause",
+                home_assistant::ha_custom_wind_pause_task(
                     status_cache,
                     runtime_sender,
                     custom_wind_pause,
-                ))
-                .ok();
-            spawner
-                .spawn(home_assistant::ha_rotation_duration_task(
+                )
+            );
+            spawn_task!(
+                spawner,
+                "ha-rotation-duration",
+                home_assistant::ha_rotation_duration_task(
                     status_cache,
                     runtime_sender,
                     rotation_duration,
-                ))
-                .ok();
-            spawner
-                .spawn(home_assistant::ha_rtc_offset_select_task(
-                    status_cache,
-                    runtime_sender,
-                    rtc_offset,
-                ))
-                .ok();
-            spawner
-                .spawn(home_assistant::ha_rtc_dst_task(
-                    status_cache,
-                    runtime_sender,
-                    rtc_dst,
-                ))
-                .ok();
-            spawner
-                .spawn(home_assistant::ha_screen_schedule_enabled_task(
+                )
+            );
+            spawn_task!(
+                spawner,
+                "ha-rtc-offset",
+                home_assistant::ha_rtc_offset_select_task(status_cache, runtime_sender, rtc_offset,)
+            );
+            spawn_task!(
+                spawner,
+                "ha-rtc-dst",
+                home_assistant::ha_rtc_dst_task(status_cache, runtime_sender, rtc_dst,)
+            );
+            spawn_task!(
+                spawner,
+                "ha-screen-schedule-enabled",
+                home_assistant::ha_screen_schedule_enabled_task(
                     status_cache,
                     runtime_sender,
                     screen_schedule_enabled,
-                ))
-                .ok();
-            spawner
-                .spawn(home_assistant::ha_screen_schedule_start_hour_task(
+                )
+            );
+            spawn_task!(
+                spawner,
+                "ha-screen-schedule-start-hour",
+                home_assistant::ha_screen_schedule_start_hour_task(
                     status_cache,
                     runtime_sender,
                     screen_schedule_start_hour,
-                ))
-                .ok();
-            spawner
-                .spawn(home_assistant::ha_screen_schedule_start_minute_task(
+                )
+            );
+            spawn_task!(
+                spawner,
+                "ha-screen-schedule-start-minute",
+                home_assistant::ha_screen_schedule_start_minute_task(
                     status_cache,
                     runtime_sender,
                     screen_schedule_start_minute,
-                ))
-                .ok();
-            spawner
-                .spawn(home_assistant::ha_screen_schedule_end_hour_task(
+                )
+            );
+            spawn_task!(
+                spawner,
+                "ha-screen-schedule-end-hour",
+                home_assistant::ha_screen_schedule_end_hour_task(
                     status_cache,
                     runtime_sender,
                     screen_schedule_end_hour,
-                ))
-                .ok();
-            spawner
-                .spawn(home_assistant::ha_screen_schedule_end_minute_task(
+                )
+            );
+            spawn_task!(
+                spawner,
+                "ha-screen-schedule-end-minute",
+                home_assistant::ha_screen_schedule_end_minute_task(
                     status_cache,
                     runtime_sender,
                     screen_schedule_end_minute,
-                ))
-                .ok();
-            spawner
-                .spawn(home_assistant::ha_rssi_reception_task(
-                    status_cache,
-                    rssi_reception,
-                ))
-                .ok();
-            spawner
-                .spawn(home_assistant::ha_activity_task(status_cache, activity))
-                .ok();
-            spawner
-                .spawn(home_assistant::ha_current_epoch_task(
-                    status_cache,
-                    current_epoch,
-                ))
-                .ok();
+                )
+            );
+            spawn_task!(
+                spawner,
+                "ha-rssi-reception",
+                home_assistant::ha_rssi_reception_task(status_cache, rssi_reception,)
+            );
+            spawn_task!(
+                spawner,
+                "ha-activity",
+                home_assistant::ha_activity_task(status_cache, activity)
+            );
+            spawn_task!(
+                spawner,
+                "ha-current-epoch",
+                home_assistant::ha_current_epoch_task(status_cache, current_epoch,)
+            );
         } else {
-            info!("Home Assistant disabled (set WINDEROO_HA_BROKER to enable)");
+            boot!("Home Assistant disabled (set WINDEROO_HA_BROKER to enable)");
         }
     }
 
-    spawner.spawn(wifi_task(wifi_manager)).ok();
-    spawner.spawn(controller_task(controller_loop)).ok();
-    spawner.spawn(system_task(system)).ok();
+    boot!("spawning core tasks");
+    spawn_task!(spawner, "wifi", wifi_task("wifi", wifi_manager));
+    spawn_task!(
+        spawner,
+        "controller",
+        controller_task("controller", controller_loop)
+    );
+    spawn_task!(spawner, "system", system_task("system", system));
+    boot!("boot complete");
 
     loop {
         // Best-effort initial time sync: keep requesting until the RTC looks "set".
         if wifi_status.is_connected() && rtc.now_epoch() < 60 {
+            debug!("RTC unset; requesting time sync");
             signals.request_sync();
         }
         embassy_time::Timer::after(Duration::from_secs(60)).await;

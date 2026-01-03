@@ -8,7 +8,9 @@ use embassy_time::Duration;
 use winderoo_embassy::state::StatusCache;
 use winderoo_embassy::tasks::RuntimeCommand;
 
-use winderoo_firmware::model::{Direction, StatusSnapshot, UpdateAction, UpdateRequest, WinderStatus};
+use winderoo_firmware::model::{
+    Direction, StatusSnapshot, UpdateAction, UpdateRequest, WinderStatus,
+};
 use winderoo_firmware::time::TimeOfDay;
 
 pub type RuntimeSender = embassy_sync::channel::Sender<
@@ -41,8 +43,8 @@ pub const UTC_OFFSET_OPTIONS: [&str; 40] = [
 
 const UTC_OFFSET_VALUES: [f32; 40] = [
     -12.0, -11.0, -10.0, -9.5, -9.0, -8.0, -7.0, -6.0, -5.0, -4.5, -4.0, -3.5, -3.0, -2.0, -1.0,
-    0.0, 1.0, 2.0, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 5.75, 6.0, 6.5, 7.0, 8.0, 8.75, 9.0, 9.5,
-    10.0, 10.5, 11.0, 11.5, 12.0, 12.75, 13.0, 14.0,
+    0.0, 1.0, 2.0, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 5.75, 6.0, 6.5, 7.0, 8.0, 8.75, 9.0, 9.5, 10.0,
+    10.5, 11.0, 11.5, 12.0, 12.75, 13.0, 14.0,
 ];
 
 fn base_update(snapshot: &StatusSnapshot) -> UpdateRequest {
@@ -279,7 +281,8 @@ pub async fn ha_direction_select_task(
         let snapshot = status_cache.snapshot();
         direction.set_state_index(snapshot.direction.home_assistant_index());
 
-        if let Ok(cmd) = embassy_time::with_timeout(Duration::from_secs(1), direction.wait()).await {
+        if let Ok(cmd) = embassy_time::with_timeout(Duration::from_secs(1), direction.wait()).await
+        {
             let snapshot = status_cache.snapshot();
             let mut update = base_update(&snapshot);
             update.direction = index_to_direction(cmd);
@@ -425,7 +428,11 @@ pub async fn ha_rtc_dst_task(
 
     loop {
         let snapshot = status_cache.snapshot();
-        dst.set(if snapshot.dst { BinaryState::On } else { BinaryState::Off });
+        dst.set(if snapshot.dst {
+            BinaryState::On
+        } else {
+            BinaryState::Off
+        });
 
         if let Ok(cmd) = embassy_time::with_timeout(Duration::from_secs(1), dst.wait()).await {
             let enabled = matches!(cmd, BinaryState::On);
@@ -494,7 +501,9 @@ pub async fn ha_screen_schedule_start_minute_task(
 ) -> ! {
     loop {
         let snapshot = status_cache.snapshot();
-        value.set_state_index(timer_minutes_to_index(snapshot.screen_schedule_start.minute));
+        value.set_state_index(timer_minutes_to_index(
+            snapshot.screen_schedule_start.minute,
+        ));
 
         if let Ok(cmd) = embassy_time::with_timeout(Duration::from_secs(1), value.wait()).await {
             let snapshot = status_cache.snapshot();
@@ -598,4 +607,3 @@ pub async fn ha_current_epoch_task(
         Timer::after(Duration::from_secs(1)).await;
     }
 }
-

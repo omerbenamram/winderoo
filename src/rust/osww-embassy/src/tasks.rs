@@ -9,10 +9,13 @@ use alloc::vec;
 #[cfg(feature = "embedded")]
 use embassy_time::{Duration, Ticker, Timer};
 
-use winderoo_firmware::controller::ControllerEvent;
-use winderoo_firmware::hardware::LedPattern;
+#[cfg(feature = "embedded")]
+use log::{debug, info, warn};
+
 #[cfg(feature = "embedded")]
 use winderoo_firmware::controller::Controller;
+use winderoo_firmware::controller::ControllerEvent;
+use winderoo_firmware::hardware::LedPattern;
 #[cfg(feature = "embedded")]
 use winderoo_firmware::hardware::RandomSource;
 use winderoo_firmware::model::UpdateRequest;
@@ -235,8 +238,10 @@ where
         self.last_wifi_connected = connected;
 
         let pattern = if connected {
+            info!("controller: Wi-Fi connected");
             LedPattern::Off
         } else {
+            warn!("controller: Wi-Fi disconnected");
             LedPattern::On
         };
         self.dispatcher
@@ -255,8 +260,21 @@ where
             > = None;
 
             for event in events.into_iter() {
+                match &event {
+                    ControllerEvent::PersistSettings(_) => {
+                        info!("controller: persist settings requested");
+                    }
+                    ControllerEvent::SyncTime => {
+                        info!("controller: time sync requested");
+                    }
+                    ControllerEvent::RestartDevice => {
+                        warn!("controller: restart requested");
+                    }
+                    _ => {}
+                }
                 match event {
                     winderoo_firmware::controller::ControllerEvent::PauseSeconds(seconds) => {
+                        debug!("controller: pause {}s", seconds);
                         // During long pauses, allow runtime commands (e.g. power off / reset) to
                         // interrupt the pause so we don't blindly resume winding after the delay.
                         match select(
@@ -268,6 +286,34 @@ where
                             Either::First(_) => {}
                             Either::Second(command) => {
                                 let now_epoch = self.time_source.now_epoch();
+                                match &command {
+                                    RuntimeCommand::ApplyPower(enabled) => {
+                                        info!(
+                                            "controller: cmd (interrupt) ApplyPower({})",
+                                            enabled
+                                        );
+                                    }
+                                    RuntimeCommand::ApplyTimer(enabled) => {
+                                        info!(
+                                            "controller: cmd (interrupt) ApplyTimer({})",
+                                            enabled
+                                        );
+                                    }
+                                    RuntimeCommand::ApplyUpdate(update) => {
+                                        info!(
+                                            "controller: cmd (interrupt) ApplyUpdate(action={:?}, direction={:?}, rpd={})",
+                                            update.action,
+                                            update.direction,
+                                            update.rotations_per_day
+                                        );
+                                    }
+                                    RuntimeCommand::ProvisioningSuccess => {
+                                        info!("controller: cmd (interrupt) ProvisioningSuccess");
+                                    }
+                                    RuntimeCommand::Reset => {
+                                        warn!("controller: cmd (interrupt) Reset");
+                                    }
+                                }
                                 let events = match command {
                                     RuntimeCommand::ApplyPower(enabled) => {
                                         self.controller.apply_power(enabled)
@@ -278,7 +324,9 @@ where
                                     RuntimeCommand::ApplyUpdate(update) => {
                                         self.controller.apply_update(update, now_epoch)
                                     }
-                                    RuntimeCommand::ProvisioningSuccess => provisioning_success_events(),
+                                    RuntimeCommand::ProvisioningSuccess => {
+                                        provisioning_success_events()
+                                    }
                                     RuntimeCommand::Reset => self.controller.request_reset(),
                                 };
                                 interrupted = Some(events);
@@ -305,6 +353,7 @@ where
     pub async fn run(mut self) -> ! {
         use embassy_futures::select::{select, Either};
 
+        info!("controller: task starting");
         let mut ticker = Ticker::every(self.tick_interval);
         loop {
             match select(ticker.next(), self.commands.receive()).await {
@@ -319,6 +368,26 @@ where
                 }
                 Either::Second(command) => {
                     let now_epoch = self.time_source.now_epoch();
+                    match &command {
+                        RuntimeCommand::ApplyPower(enabled) => {
+                            info!("controller: cmd ApplyPower({})", enabled);
+                        }
+                        RuntimeCommand::ApplyTimer(enabled) => {
+                            info!("controller: cmd ApplyTimer({})", enabled);
+                        }
+                        RuntimeCommand::ApplyUpdate(update) => {
+                            info!(
+                                "controller: cmd ApplyUpdate(action={:?}, direction={:?}, rpd={})",
+                                update.action, update.direction, update.rotations_per_day
+                            );
+                        }
+                        RuntimeCommand::ProvisioningSuccess => {
+                            info!("controller: cmd ProvisioningSuccess");
+                        }
+                        RuntimeCommand::Reset => {
+                            warn!("controller: cmd Reset");
+                        }
+                    }
                     match command {
                         RuntimeCommand::ApplyPower(enabled) => {
                             let events = self.controller.apply_power(enabled);
@@ -357,9 +426,9 @@ mod provisioning_tests {
     fn provisioning_success_bundle_matches_expected_shape() {
         let events = provisioning_success_events();
         let mut expected = alloc::vec::Vec::new();
-        expected.push(ControllerEvent::DisplayNotification(alloc::string::String::from(
-            "Connected to WiFi",
-        )));
+        expected.push(ControllerEvent::DisplayNotification(
+            alloc::string::String::from("Connected to WiFi"),
+        ));
         expected.push(ControllerEvent::Led(LedPattern::SlowBlink));
         expected.push(ControllerEvent::RestartDevice);
         assert_eq!(events, expected);

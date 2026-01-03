@@ -75,15 +75,23 @@ pub fn field_size(field: &Field) -> usize {
             n
         }
         Field::Buffer(v) => v.len(),
-        Field::LenPrefixedBuffer(v) => v.len().strict_add(2),
-        Field::LenPrefixedString(v) => v.len().strict_add(2),
+        Field::LenPrefixedBuffer(v) => v
+            .len()
+            .checked_add(2)
+            .expect("len-prefixed buffer size overflow"),
+        Field::LenPrefixedString(v) => v
+            .len()
+            .checked_add(2)
+            .expect("len-prefixed string size overflow"),
     }
 }
 
 pub fn fields_size(fields: &[Field]) -> usize {
     let mut total_size = 0usize;
     for field in fields {
-        total_size = total_size.strict_add(field_size(field));
+        total_size = total_size
+            .checked_add(field_size(field))
+            .expect("field buffer size overflow");
     }
     total_size
 }

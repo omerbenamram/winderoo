@@ -68,7 +68,7 @@ export function Header() {
           <div class="dialog" onClick={(e) => e.stopPropagation()}>
             <h2>{t.header.dialog.title}</h2>
             <p class="text-secondary mt-2">{t.header.dialog.subtitle}</p>
-            
+
             <ul class="reset-steps">
               <li>{t.header.dialog.point1}</li>
               <li>{t.header.dialog.point2} <strong>Winderoo</strong></li>

@@ -210,36 +210,10 @@ pub fn build_router<'a, const N: usize>(
         .route("/app", get_service(static_assets::INDEX_HTML))
         .route("/app/", get_service(static_assets::INDEX_HTML))
         .route("/index.html", get_service(static_assets::INDEX_HTML))
-        .route("/main.js", get_service(static_assets::MAIN_JS))
-        .route("/polyfills.js", get_service(static_assets::POLYFILLS_JS))
-        .route("/runtime.js", get_service(static_assets::RUNTIME_JS))
-        .route("/styles.css", get_service(static_assets::STYLES_CSS))
+        .route("/app.js", get_service(static_assets::APP_JS))
+        .route("/app.css", get_service(static_assets::APP_CSS))
         .route("/favicon.ico", get_service(static_assets::FAVICON))
-        .route(
-            "/3rdpartylicenses.txt",
-            get_service(static_assets::THIRD_PARTY_LICENSES),
-        )
         .route("/settings.json", get_service(static_assets::SETTINGS_JSON))
-        .route(
-            "/assets/i18n/en-US.json",
-            get_service(static_assets::I18N_EN),
-        )
-        .route(
-            "/assets/i18n/es-ES.json",
-            get_service(static_assets::I18N_ES),
-        )
-        .route(
-            "/assets/i18n/fr-FR.json",
-            get_service(static_assets::I18N_FR),
-        )
-        .route(
-            "/assets/i18n/de-DE.json",
-            get_service(static_assets::I18N_DE),
-        )
-        .route(
-            "/assets/i18n/pt-BR.json",
-            get_service(static_assets::I18N_PT),
-        )
         // `picoserve::Server` expects a router with `State = ()`. We capture our real state
         // here and ignore the incoming `()` state.
         .with_state(state)
@@ -412,34 +386,19 @@ mod static_assets {
         include_bytes!("../../../../data/index.html.gz"),
         GZIP_CACHE_NONE,
     );
-    pub const MAIN_JS: File = gzip_file(
+    pub const APP_JS: File = gzip_file(
         File::MIME_JS,
-        include_bytes!("../../../../data/main.js.gz"),
+        include_bytes!("../../../../data/app.js.gz"),
         GZIP_CACHE_FOREVER,
     );
-    pub const POLYFILLS_JS: File = gzip_file(
-        File::MIME_JS,
-        include_bytes!("../../../../data/polyfills.js.gz"),
-        GZIP_CACHE_FOREVER,
-    );
-    pub const RUNTIME_JS: File = gzip_file(
-        File::MIME_JS,
-        include_bytes!("../../../../data/runtime.js.gz"),
-        GZIP_CACHE_FOREVER,
-    );
-    pub const STYLES_CSS: File = gzip_file(
+    pub const APP_CSS: File = gzip_file(
         File::MIME_CSS,
-        include_bytes!("../../../../data/styles.css.gz"),
+        include_bytes!("../../../../data/app.css.gz"),
         GZIP_CACHE_FOREVER,
     );
     pub const FAVICON: File = gzip_file(
         "image/x-icon",
         include_bytes!("../../../../data/favicon.ico.gz"),
-        GZIP_CACHE_FOREVER,
-    );
-    pub const THIRD_PARTY_LICENSES: File = gzip_file(
-        "text/plain; charset=utf-8",
-        include_bytes!("../../../../data/3rdpartylicenses.txt.gz"),
         GZIP_CACHE_FOREVER,
     );
     pub const SETTINGS_JSON: File = plain_file(
@@ -451,31 +410,6 @@ mod static_assets {
         File::MIME_HTML,
         include_bytes!("../../../../data/wifi.html"),
         CACHE_NONE,
-    );
-    pub const I18N_EN: File = plain_file(
-        "application/json; charset=utf-8",
-        include_bytes!("../../../../data/assets/i18n/en-US.json"),
-        CACHE_FOREVER,
-    );
-    pub const I18N_ES: File = plain_file(
-        "application/json; charset=utf-8",
-        include_bytes!("../../../../data/assets/i18n/es-ES.json"),
-        CACHE_FOREVER,
-    );
-    pub const I18N_FR: File = plain_file(
-        "application/json; charset=utf-8",
-        include_bytes!("../../../../data/assets/i18n/fr-FR.json"),
-        CACHE_FOREVER,
-    );
-    pub const I18N_DE: File = plain_file(
-        "application/json; charset=utf-8",
-        include_bytes!("../../../../data/assets/i18n/de-DE.json"),
-        CACHE_FOREVER,
-    );
-    pub const I18N_PT: File = plain_file(
-        "application/json; charset=utf-8",
-        include_bytes!("../../../../data/assets/i18n/pt-BR.json"),
-        CACHE_FOREVER,
     );
 }
 

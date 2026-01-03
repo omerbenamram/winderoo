@@ -415,7 +415,10 @@ where
 
         assert_eq!(self.rx_buffer_skip, 0);
         let from_buffer = self.rx_buffer_data.min(self.rx_buffer_len);
-        let from_transport = self.rx_buffer_data.strict_sub(from_buffer);
+        let from_transport = self
+            .rx_buffer_data
+            .checked_sub(from_buffer)
+            .expect("rx_buffer_data underflow");
 
         buf[..from_buffer].copy_from_slice(&self.rx_buffer[..from_buffer]);
         self.rx_buffer_len -= from_buffer;
@@ -466,7 +469,10 @@ where
         assert!(self.rx_buffer_len >= self.rx_buffer_skip);
         if self.rx_buffer_skip != 0 {
             self.rx_buffer.copy_within(self.rx_buffer_skip.., 0);
-            self.rx_buffer_len = self.rx_buffer_len.strict_sub(self.rx_buffer_skip);
+            self.rx_buffer_len = self
+                .rx_buffer_len
+                .checked_sub(self.rx_buffer_skip)
+                .expect("rx_buffer_len underflow");
             self.rx_buffer_skip = 0;
         }
     }

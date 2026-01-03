@@ -17,6 +17,8 @@ use crate::sntp::SntpClient;
 use crate::state::StatusCache;
 #[cfg(feature = "embedded")]
 use crate::time::RtcClock;
+#[cfg(feature = "embedded")]
+use log::{info, warn};
 
 const SETTINGS_HEADER_SIZE: usize = 8;
 
@@ -263,18 +265,36 @@ where
 
         loop {
             if let Some(snapshot) = self.signals.take_persist() {
+                info!("system: persisting settings");
                 let stored = StoredSettings::from_snapshot(&snapshot);
-                let _ = self.store.save(&stored);
-            }
-
-            if self.signals.take_sync() {
-                if let Ok(utc_epoch) = self.sntp.sync().await {
-                    let local_epoch = self.compute_local_epoch(utc_epoch);
-                    self.rtc.set_epoch(local_epoch);
+                if let Err(err) = self.store.save(&stored) {
+                    warn!("system: persist failed: {:?}", err);
+                } else {
+                    info!("system: settings persisted");
                 }
             }
 
+            if self.signals.take_sync() {
+                info!("system: time sync requested");
+                match self.sntp.sync().await {
+                    Ok(utc_epoch) => {
+                        let local_epoch = self.compute_local_epoch(utc_epoch);
+                        info!(
+                            "system: SNTP sync ok (utc_epoch={}, local_epoch={})",
+                            utc_epoch, local_epoch
+                        );
+                        self.rtc.set_epoch(local_epoch);
+                    }
+                    Err(err) => {
+                        warn!("system: SNTP sync failed: {:?}", err);
+                    }
+                }
+                // Add explicit yield after sync to prevent potential tight-loop if Timer is broken
+                Timer::after(Duration::from_secs(5)).await;
+            }
+
             if self.signals.take_restart() {
+                warn!("system: restart requested");
                 self.reset.reset();
             }
 

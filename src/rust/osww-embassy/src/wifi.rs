@@ -11,6 +11,10 @@ use core::future::Future;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::{Channel, Receiver, Sender};
 
+#[cfg(feature = "embedded")]
+use log::debug;
+use log::{info, warn};
+
 use crate::state::WifiStatus;
 #[cfg(feature = "embedded")]
 use crate::tasks::RuntimeCommand;
@@ -163,6 +167,11 @@ where
     >,
     provisioning: ProvisioningConfig,
     reconnect_interval_secs: u64,
+    /// True when we've switched the radio into SoftAP provisioning mode.
+    ///
+    /// Note: `WifiControl::is_connected()` represents STA connectivity, so it will typically be
+    /// false in AP mode. We track this separately to avoid repeatedly restarting the AP.
+    in_provisioning: bool,
 }
 
 #[cfg_attr(not(feature = "embedded"), allow(dead_code))]
@@ -177,8 +186,7 @@ where
         store: S,
         status: &'a WifiStatus,
         commands: Receiver<'a, CriticalSectionRawMutex, WifiCommand, N>,
-        #[cfg(feature = "embedded")]
-        runtime_sender: Option<
+        #[cfg(feature = "embedded")] runtime_sender: Option<
             embassy_sync::channel::Sender<
                 'a,
                 embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
@@ -198,15 +206,33 @@ where
             runtime_sender,
             provisioning,
             reconnect_interval_secs,
+            in_provisioning: false,
         }
     }
 
     async fn connect_with_saved(&mut self) -> Result<(), WifiError> {
-        if let Some(creds) = self.store.load() {
-            self.control.connect(&creds).await?;
-            Ok(())
-        } else {
-            Err(WifiError::ConnectionFailed)
+        match self.store.load() {
+            Some(creds) => {
+                info!(
+                    "wifi: connecting using saved credentials (ssid='{}')",
+                    creds.ssid
+                );
+                match self.control.connect(&creds).await {
+                    Ok(()) => {
+                        info!("wifi: connected to '{}'", creds.ssid);
+                        self.in_provisioning = false;
+                        Ok(())
+                    }
+                    Err(err) => {
+                        warn!("wifi: connect to '{}' failed: {:?}", creds.ssid, err);
+                        Err(err)
+                    }
+                }
+            }
+            None => {
+                warn!("wifi: no saved credentials");
+                Err(WifiError::ConnectionFailed)
+            }
         }
     }
 
@@ -215,7 +241,17 @@ where
             self.provisioning.ssid.clone(),
             self.provisioning.password.clone(),
         );
-        self.control.start_ap(&creds).await
+        info!("wifi: starting provisioning AP (ssid='{}')", creds.ssid);
+        match self.control.start_ap(&creds).await {
+            Ok(()) => {
+                self.in_provisioning = true;
+                Ok(())
+            }
+            Err(err) => {
+                warn!("wifi: failed to start provisioning AP: {:?}", err);
+                Err(err)
+            }
+        }
     }
 
     fn refresh_status(&self) {
@@ -229,7 +265,13 @@ where
         use embassy_futures::select::{select, Either};
         use embassy_time::{Duration, Timer};
 
+        info!(
+            "wifi: task starting (reconnect_interval={}s, provisioning_ssid='{}')",
+            self.reconnect_interval_secs, self.provisioning.ssid
+        );
+
         if self.connect_with_saved().await.is_err() {
+            warn!("wifi: entering provisioning mode");
             let _ = self.enter_provisioning().await;
         }
 
@@ -244,24 +286,40 @@ where
             {
                 Either::First(cmd) => match cmd {
                     WifiCommand::SetCredentials(credentials) => {
+                        info!(
+                            "wifi: received new credentials (ssid='{}', password_len={})",
+                            credentials.ssid,
+                            credentials.password.len()
+                        );
                         self.store.save(&credentials);
+                        debug!("wifi: disconnecting before reconnect");
                         let _ = self.control.disconnect().await;
                         if self.control.connect(&credentials).await.is_err() {
+                            warn!("wifi: connect failed; returning to provisioning mode");
                             let _ = self.enter_provisioning().await;
                         } else {
+                            info!("wifi: connected using new credentials; requesting reboot UX");
                             // Mirror WiFiManager UX: after successful provisioning, reboot.
                             // We ask the controller to render the success LED pattern first.
                             if let Some(sender) = &self.runtime_sender {
+                                // embassy_sync::channel::Sender::send() is infallible (waits for space)
                                 sender.send(RuntimeCommand::ProvisioningSuccess).await;
+                                info!("wifi: notified controller of provisioning success");
+                            } else {
+                                warn!(
+                                    "wifi: provisioning success but no runtime sender configured"
+                                );
                             }
                         }
                     }
                     WifiCommand::ForgetCredentials => {
+                        warn!("wifi: forgetting saved credentials; entering provisioning");
                         self.store.clear();
                         let _ = self.control.disconnect().await;
                         let _ = self.enter_provisioning().await;
                     }
                     WifiCommand::ForceReconnect => {
+                        info!("wifi: forced reconnect requested");
                         let _ = self.control.disconnect().await;
                         if self.connect_with_saved().await.is_err() {
                             let _ = self.enter_provisioning().await;
@@ -269,10 +327,16 @@ where
                     }
                 },
                 Either::Second(_) => {
-                    if !self.control.is_connected() {
+                    // Only attempt STA reconnects when we're not already in provisioning mode.
+                    // In AP mode, `is_connected()` stays false and we'd otherwise restart the AP
+                    // every interval (making the SSID harder to discover/reliable to use).
+                    if !self.control.is_connected() && !self.in_provisioning {
+                        info!("wifi: disconnected; attempting periodic reconnect");
                         if self.connect_with_saved().await.is_err() {
                             let _ = self.enter_provisioning().await;
                         }
+                    } else if self.in_provisioning {
+                        debug!("wifi: skipping reconnect (in provisioning mode)");
                     }
                 }
             }

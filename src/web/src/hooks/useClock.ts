@@ -6,7 +6,7 @@ export function useClock(initialEpoch: number) {
 
   useEffect(() => {
     setEpoch(initialEpoch)
-    
+
     if (intervalRef.current) {
       clearInterval(intervalRef.current)
     }
