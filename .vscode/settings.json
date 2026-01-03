@@ -60,8 +60,6 @@
         "cinttypes": "cpp"
     },
     "rust-analyzer.linkedProjects": [
-        "src/rust/osww-firmware/Cargo.toml",
-        "src/rust/osww-embassy/Cargo.toml",
         "src/rust/winderoo-esp32/Cargo.toml"
     ],
     "rust-analyzer.cargo.path": "${env:HOME}/.rustup/toolchains/esp/bin/cargo",

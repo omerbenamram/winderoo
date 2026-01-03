@@ -1,0 +1,23 @@
+{
+  "name": "winderoo-web",
+  "version": "2.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "build:esp32": "vite build && npm run gzip && npm run copy-assets",
+    "gzip": "node scripts/gzip.js",
+    "copy-assets": "cp -r src/i18n ../../../data/assets/",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "preact": "^10.25.4"
+  },
+  "devDependencies": {
+    "@preact/preset-vite": "^2.10.2",
+    "typescript": "^5.7.2",
+    "vite": "^7.3.0",
+    "vite-plugin-compression": "^0.5.1"
+  }
+}
