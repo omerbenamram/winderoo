@@ -49,10 +49,16 @@ export function StoreProvider({ children }: { children: preact.ComponentChildren
   }, [])
 
   const setPower = useCallback(async (enabled: boolean) => {
+    // Optimistic update - immediately show the new state
+    setStatus((prev) => prev ? { ...prev, winderEnabled: enabled ? 1 : 0 } : prev)
     try {
       await api.updatePower(enabled)
+      // Small delay to let the controller process the command before refresh
+      await new Promise((r) => setTimeout(r, 200))
       await refresh()
     } catch (e) {
+      // Revert on error
+      setStatus((prev) => prev ? { ...prev, winderEnabled: enabled ? 0 : 1 } : prev)
       setError(e instanceof Error ? e.message : 'Failed to update power')
     }
   }, [refresh])

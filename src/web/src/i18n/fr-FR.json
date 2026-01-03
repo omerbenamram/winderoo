@@ -1,4 +1,12 @@
 {
+  "statusBar": {
+    "motor": "Moteur",
+    "wifi": "WiFi",
+    "screen": "Écran",
+    "firmware": "Firmware",
+    "connected": "Connecté",
+    "notConnected": "Non connecté"
+  },
   "header": {
     "reset": "Réinitialiser",
     "on": "activé",

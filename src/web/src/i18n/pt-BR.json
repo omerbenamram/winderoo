@@ -1,4 +1,12 @@
 {
+  "statusBar": {
+    "motor": "Motor",
+    "wifi": "WiFi",
+    "screen": "Tela",
+    "firmware": "Firmware",
+    "connected": "Conectado",
+    "notConnected": "Não conectado"
+  },
   "header": {
     "reset": "Reiniciar",
     "on": "ligado",

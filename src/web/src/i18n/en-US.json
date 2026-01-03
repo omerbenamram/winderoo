@@ -1,4 +1,12 @@
 {
+  "statusBar": {
+    "motor": "Motor",
+    "wifi": "WiFi",
+    "screen": "Screen",
+    "firmware": "Firmware",
+    "connected": "Connected",
+    "notConnected": "Not Connected"
+  },
   "header": {
     "reset": "Reset",
     "on": "on",

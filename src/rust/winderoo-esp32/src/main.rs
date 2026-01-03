@@ -477,7 +477,7 @@ async fn mdns_task(name: &'static str, stack: embassy_net::Stack<'static>) -> ! 
 // NOTE: `picoserve` on Embassy serves **one TCP connection per task**.
 // `embassy-net` rejects incoming connections when no socket is listening (no backlog),
 // so we run multiple HTTP tasks for the STA stack to handle browsers fetching assets in parallel.
-#[embassy_executor::task(pool_size = 4)]
+#[embassy_executor::task(pool_size = 3)]
 async fn http_server_task(
     name: &'static str,
     stack: embassy_net::Stack<'static>,
@@ -612,15 +612,18 @@ async fn main(spawner: Spawner) -> ! {
     boot!("esp-radio controller initialized");
 
     // RNG for network seeds + controller RNG seed.
+    boot!("generating RNG seeds");
     let mut rng = Rng::new();
     let net_seed = rng.random() as u64 | ((rng.random() as u64) << 32);
     let net_seed_ap = rng.random() as u64 | ((rng.random() as u64) << 32);
     let controller_seed = rng.random();
 
     // Create Wi-Fi controller + both interfaces (STA + AP).
+    boot!("creating Wi-Fi controller + interfaces");
     let (wifi_controller, interfaces) =
         esp_radio::wifi::new(radio_init, peripherals.WIFI, Default::default())
             .expect("Failed to initialize Wi-Fi controller");
+    boot!("Wi-Fi controller created");
 
     // Network stacks.
     let sta_config = embassy_net::Config::dhcpv4(Default::default());
@@ -649,6 +652,7 @@ async fn main(spawner: Spawner) -> ! {
         ),
         net_seed_ap,
     );
+    boot!("network stacks created");
 
     boot!("spawning network tasks");
     spawn_task!(spawner, "net-sta", net_task("net-sta", sta_runner));
@@ -878,17 +882,6 @@ async fn main(spawner: Spawner) -> ! {
     spawn_task!(
         spawner,
         "http-sta-1",
-        http_server_task(
-            "http-sta",
-            sta_stack,
-            status_cache,
-            runtime_sender,
-            wifi_sender.clone(),
-        )
-    );
-    spawn_task!(
-        spawner,
-        "http-sta-2",
         http_server_task(
             "http-sta",
             sta_stack,

@@ -1,4 +1,12 @@
 {
+  "statusBar": {
+    "motor": "Motor",
+    "wifi": "WiFi",
+    "screen": "Pantalla",
+    "firmware": "Firmware",
+    "connected": "Conectado",
+    "notConnected": "No conectado"
+  },
   "header": {
     "reset": "Reiniciar",
     "on": "encendido",
