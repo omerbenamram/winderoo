@@ -31,18 +31,21 @@ use esp_println::logger::init_logger;
 use log::{info, warn};
 
 use embedded_graphics::mono_font::{
-    ascii::{FONT_10X20, FONT_6X10},
+    ascii::FONT_6X10,
     MonoTextStyle,
 };
 use embedded_graphics::pixelcolor::BinaryColor;
 use embedded_graphics::prelude::*;
-use embedded_graphics::primitives::{Line, PrimitiveStyle, Rectangle};
+use embedded_graphics::primitives::{PrimitiveStyle, Rectangle};
 use embedded_graphics::text::{Baseline, Text};
 
 const I2C_FREQ_KHZ: u32 = 400;
 const OLED_INVERT: bool = false;
 const OLED_ROTATE_180: bool = false;
-const FRAME_MS: u64 = 250;
+const FRAME_MS: u64 = 40;
+
+const DISPLAY_W: i32 = 128;
+const DISPLAY_H: i32 = 64;
 
 /// Timestamp provider for esp-println logger (milliseconds since boot).
 #[no_mangle]
@@ -97,60 +100,104 @@ async fn main(_spawner: Spawner) -> ! {
     let _ = display.set_invert(OLED_INVERT);
     let _ = display.flush();
 
-    info!("rendering test pattern (invert={}, rotate_180={})", OLED_INVERT, OLED_ROTATE_180);
+    info!(
+        "rendering DVD bounce (invert={}, rotate_180={})",
+        OLED_INVERT, OLED_ROTATE_180
+    );
 
     let style_small = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
-    let style_big = MonoTextStyle::new(&FONT_10X20, BinaryColor::On);
 
-    let mut frame: u32 = 0;
+    // "DVD" logo box (monospace font + padding).
+    const LOGO_TEXT: &str = "DVD";
+    const PAD: i32 = 2;
+    let char_w = FONT_6X10.character_size.width as i32;
+    let char_h = FONT_6X10.character_size.height as i32;
+    let text_w = (LOGO_TEXT.as_bytes().len() as i32) * char_w;
+    let text_h = char_h;
+    let box_w = text_w + PAD * 2;
+    let box_h = text_h + PAD * 2;
+
+    // Keep the logo inside the border.
+    let min_x = 1;
+    let min_y = 1;
+    let max_x = (DISPLAY_W - 1) - box_w; // x + box_w - 1 <= 126
+    let max_y = (DISPLAY_H - 1) - box_h; // y + box_h - 1 <= 62
+
+    let mut x: i32 = 10;
+    let mut y: i32 = 10;
+    let mut vx: i32 = 2;
+    let mut vy: i32 = 1;
+    let mut invert_logo = false;
+
     loop {
-        frame = frame.wrapping_add(1);
+        // Update position (bounce off edges).
+        let mut bounced = false;
+
+        let mut next_x = x + vx;
+        if next_x < min_x {
+            next_x = min_x;
+            vx = -vx;
+            bounced = true;
+        } else if next_x > max_x {
+            next_x = max_x;
+            vx = -vx;
+            bounced = true;
+        }
+
+        let mut next_y = y + vy;
+        if next_y < min_y {
+            next_y = min_y;
+            vy = -vy;
+            bounced = true;
+        } else if next_y > max_y {
+            next_y = max_y;
+            vy = -vy;
+            bounced = true;
+        }
+
+        x = next_x;
+        y = next_y;
+
+        if bounced {
+            invert_logo = !invert_logo;
+        }
 
         display.clear_buffer();
 
-        // Border.
-        let _ = Rectangle::new(Point::new(0, 0), Size::new(128, 64))
+        // Border (keeps the bounce constrained and makes rotation obvious).
+        let _ = Rectangle::new(Point::new(0, 0), Size::new(DISPLAY_W as u32, DISPLAY_H as u32))
             .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
             .draw(&mut display);
 
-        // Crosshair to help validate rotation/origin.
-        let _ = Line::new(Point::new(64, 0), Point::new(64, 63))
-            .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
-            .draw(&mut display);
-        let _ = Line::new(Point::new(0, 32), Point::new(127, 32))
-            .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
-            .draw(&mut display);
+        // "DVD" logo (simple but very readable on monochrome OLEDs).
+        let logo_box = Rectangle::new(Point::new(x, y), Size::new(box_w as u32, box_h as u32));
+        if invert_logo {
+            // Filled box + "cut out" text.
+            let _ = logo_box
+                .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+                .draw(&mut display);
 
-        // Title + pin hint.
-        let _ = Text::with_baseline(
-            "I2C OLED TEST",
-            Point::new(6, 2),
-            style_small,
-            Baseline::Top,
-        )
-        .draw(&mut display);
-        let _ = Text::with_baseline(
-            "SDA21 SCL22",
-            Point::new(6, 12),
-            style_small,
-            Baseline::Top,
-        )
-        .draw(&mut display);
-
-        // Frame counter (big text).
-        let mut buf = heapless::String::<16>::new();
-        {
-            use core::fmt::Write as _;
-            let _ = core::write!(&mut buf, "#{:05}", frame);
+            let style_inv = MonoTextStyle::new(&FONT_6X10, BinaryColor::Off);
+            let _ = Text::with_baseline(
+                LOGO_TEXT,
+                Point::new(x + PAD, y + PAD),
+                style_inv,
+                Baseline::Top,
+            )
+            .draw(&mut display);
+        } else {
+            // Outline + normal text.
+            let _ = logo_box
+                .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
+                .draw(&mut display);
+            let _ = Text::with_baseline(
+                LOGO_TEXT,
+                Point::new(x + PAD, y + PAD),
+                style_small,
+                Baseline::Top,
+            )
+            .draw(&mut display);
         }
-        let _ = Text::with_baseline(&buf, Point::new(6, 18), style_big, Baseline::Top)
-            .draw(&mut display);
-
-        // Moving filled square along the bottom (checks continuous refresh).
-        let x = (frame % 120) as i32;
-        let _ = Rectangle::new(Point::new(x, 52), Size::new(8, 8))
-            .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
-            .draw(&mut display);
 
         if display.flush().is_err() {
             warn!("display flush failed (I2C error)");

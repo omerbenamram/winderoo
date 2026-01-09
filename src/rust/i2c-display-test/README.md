@@ -16,10 +16,9 @@ Most SSD1306 modules use I2C address **0x3C** (some are **0x3D**).
 
 ## What you should see
 
-- A border rectangle + crosshair (helps verify rotation/origin)
-- `I2C OLED TEST` header
-- An increasing `#00001` counter
-- A moving filled 8x8 square along the bottom
+- A 1px border rectangle (helps verify rotation/origin)
+- A small “DVD” logo bouncing around the screen
+- The logo flips between outline/filled each time it bounces (easy to spot missed frames)
 
 ## Prerequisites
 
