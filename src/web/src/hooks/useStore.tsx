@@ -4,6 +4,29 @@ import type { Status, Language } from '../types'
 import { api } from '../api'
 import { getTranslations } from '../i18n'
 
+function toNumber(value: unknown, fallback = 0): number {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : fallback
+  if (typeof value === 'string') {
+    const n = Number(value)
+    return Number.isFinite(n) ? n : fallback
+  }
+  if (typeof value === 'boolean') return value ? 1 : 0
+  return fallback
+}
+
+function toBoolean(value: unknown, fallback = false): boolean {
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'number') return value !== 0
+  if (typeof value === 'string') {
+    const s = value.trim().toLowerCase()
+    if (s === '1' || s === 'true' || s === 'yes' || s === 'on') return true
+    if (s === '0' || s === 'false' || s === 'no' || s === 'off') return false
+    const n = Number(value)
+    if (Number.isFinite(n)) return n !== 0
+  }
+  return fallback
+}
+
 interface Store {
   status: Status | null
   loading: boolean
@@ -37,9 +60,30 @@ export function StoreProvider({ children }: { children: preact.ComponentChildren
     try {
       setLoading(true)
       setError(null)
-      const data = await api.getStatus()
-      // Normalize the db value (comes as negative from ESP)
-      data.db = Math.abs(data.db)
+      const raw = (await api.getStatus()) as unknown as Record<string, unknown>
+
+      // Firmware API intentionally serializes many numbers as strings (for backward-compat).
+      // Normalize to the strongly-typed `Status` we use in the UI.
+      const data: Status = {
+        ...(raw as unknown as Status),
+        batteryLevel: raw.batteryLevel == null ? null : toNumber(raw.batteryLevel),
+        db: Math.abs(toNumber(raw.db)),
+        rotationsPerDay: toNumber(raw.rotationsPerDay),
+        startTimeEpoch: toNumber(raw.startTimeEpoch),
+        currentTimeEpoch: toNumber(raw.currentTimeEpoch),
+        estimatedRoutineFinishEpoch: toNumber(raw.estimatedRoutineFinishEpoch),
+        winderEnabled: toNumber(raw.winderEnabled),
+        timerEnabled: toNumber(raw.timerEnabled),
+        screenSleep: toBoolean(raw.screenSleep),
+        screenScheduleEnabled: toBoolean(raw.screenScheduleEnabled),
+        screenEquipped: toBoolean(raw.screenEquipped),
+        customWindDuration: toNumber(raw.customWindDuration, 180),
+        customWindPauseDuration: toNumber(raw.customWindPauseDuration, 15),
+        customDurationInSecondsToCompleteOneRevolution: toNumber(raw.customDurationInSecondsToCompleteOneRevolution, 8),
+        gmtOffset: toNumber(raw.gmtOffset),
+        dst: toBoolean(raw.dst),
+      }
+
       setStatus(data)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to fetch status')

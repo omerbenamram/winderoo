@@ -1,0 +1,13 @@
+[build]
+target = "xtensa-esp32-none-elf"
+
+[unstable]
+# The esp toolchain does not ship prebuilt core/alloc for Xtensa targets.
+# Build them from source automatically (requires nightly cargo, which `esp` provides).
+build-std = ["core"]
+build-std-features = ["compiler-builtins-mem"]
+
+[target.xtensa-esp32-none-elf]
+rustflags = [
+  "-C", "link-arg=-Tlinkall.x",
+]

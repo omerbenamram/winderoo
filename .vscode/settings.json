@@ -60,15 +60,16 @@
         "cinttypes": "cpp"
     },
     "rust-analyzer.linkedProjects": [
-        "src/rust/winderoo-esp32/Cargo.toml"
+        // "src/rust/winderoo-esp32/Cargo.toml",
+        "src/rust/blinky/Cargo.toml"
     ],
     "rust-analyzer.cargo.path": "${env:HOME}/.rustup/toolchains/esp/bin/cargo",
-    "rust-analyzer.cargo.features": [
-        "oled",
-        "home-assistant",
-        "pwm-motor",
-        "embedded"
-    ],
+    // "rust-analyzer.cargo.features": [
+    //     "oled",
+    //     "home-assistant",
+    //     "pwm-motor",
+    //     "embedded"
+    // ],
     "rust-analyzer.server.extraEnv": {
         "RUSTUP_TOOLCHAIN": "esp",
         "PATH": "${env:HOME}/.rustup/toolchains/esp/bin:${env:HOME}/.cargo/bin:/usr/bin:/bin:/usr/sbin:/sbin:${env:PATH}"

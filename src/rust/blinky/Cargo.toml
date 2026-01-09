@@ -1,0 +1,29 @@
+[package]
+name = "blinky"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# HAL + runtime
+esp-hal = { version = "1.0", features = ["esp32", "unstable"] }
+esp-rtos = { version = "0.2.0", features = ["esp32", "embassy"] }
+
+# Embassy for async blink
+embassy-executor = "0.9"
+embassy-time = { version = "0.5", features = ["tick-hz-1_000_000"] }
+
+# Logging + panic handler (same setup as winderoo-esp32)
+esp-println = { version = "0.16.1", default-features = false, features = ["esp32", "uart", "log-04", "timestamp"] }
+esp-backtrace = { version = "0.18.1", default-features = false, features = ["esp32", "panic-handler", "println"] }
+
+# Bootloader descriptor
+esp-bootloader-esp-idf = { version = "0.4", features = ["esp32"] }
+
+log = "0.4"
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+
+[profile.dev]
+opt-level = 1

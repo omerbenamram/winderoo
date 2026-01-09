@@ -72,7 +72,7 @@ export function StatusBar() {
             <div class="status-info">
               <span class="status-label">{t.statusBar?.screen || 'Screen'}</span>
               <span class="status-value">
-                {status.screenEquipped 
+                {status.screenEquipped
                   ? (t.statusBar?.connected || 'Connected')
                   : (t.statusBar?.notConnected || 'Not Connected')}
               </span>
